@@ -1,3 +1,5 @@
+// server/index.js
+const path = require("path");
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
@@ -6,23 +8,39 @@ const { Server } = require("socket.io");
 /* ---------------- Config ---------------- */
 const PORT = process.env.PORT || 3000;
 const ARENA = { w: 1280, h: 720, margin: 20 };
-const TICK_MS = 33;                 // ~30 Hz physics
-const SNAPSHOT_MS = 66;             // ~15 Hz broadcast
-const SPEED_PPS = 220;
+const TICK_MS = 16;          // 60 Hz physics
+const SNAPSHOT_MS = 33;      // ~30 Hz broadcast
+const SPEED_PPS = 260;       // pixels per second
 const SPEED_PER_TICK = SPEED_PPS * (TICK_MS / 1000);
+const halfX = () => ARENA.w / 2;
 
 /* ---------------- App/IO ---------------- */
 const app = express();
 app.use(cors());
-app.use(express.static("public"));
+app.use(express.json({ limit: "5mb" })); // base64 photos
+app.use(express.urlencoded({ extended: false }));
+
+// Serve built client if available
+app.use(express.static(path.join(__dirname, "..", "client", "dist")));
 app.get("/health", (_, res) => res.send("OK"));
+app.get("*", (req, res) => {
+  res.sendFile(path.join(__dirname, "..", "client", "dist", "index.html"), (err) => {
+    if (err) res.end(); // dev mode
+  });
+});
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, {
+  cors: { origin: "*" },
+  transports: ["websocket"],     // lower latency
+  perMessageDeflate: false,      // no compression
+  pingInterval: 2500,
+  pingTimeout: 8000,
+});
 
 /* ---------------- State ---------------- */
 const players = new Map(); // id -> {...}
-let joinSeq = 0;           // sequential number (primary key)
+let joinSeq = 0;
 
 /* ---------------- Helpers ---------------- */
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -31,15 +49,9 @@ function spawnPos(id) {
   const yo = 180 + (id.charCodeAt(1) % 5) * 110;
   return { x: xo, y: yo };
 }
-const halfX = () => ARENA.w / 2;
-
 function lobbyPayload() {
   return [...players.values()].map(p => ({
-    id: p.id,
-    n: p.seq,
-    name: p.name,
-    photo: p.photo || null,
-    // team is decided by position; lobby is just the roster
+    id: p.id, n: p.seq, name: p.name, photo: p.photo || null
   }));
 }
 function snapshotPayload() {
@@ -48,8 +60,8 @@ function snapshotPayload() {
       id: p.id,
       n: p.seq,
       name: p.name,
-      x: p.pos.x | 0,
-      y: p.pos.y | 0,
+      x: p.pos.x,
+      y: p.pos.y,
       team: p.team || null,
       photo: p.photo || null,
     }))
@@ -58,18 +70,21 @@ function snapshotPayload() {
 
 /* ---------------- Sockets ---------------- */
 io.on("connection", (socket) => {
+  // RTT echo
+  socket.on("rt", (t0) => socket.emit("rt", t0, Date.now()));
+
   socket.on("join", (msg) => {
     const name = String(msg?.name || "anon").slice(0, 12);
     const photo = msg?.photo || null;
 
     players.set(socket.id, {
       id: socket.id,
-      seq: ++joinSeq,           // 1,2,3,...
+      seq: ++joinSeq,
       name,
       photo,
       pos: spawnPos(socket.id),
       dir: { x: 0, y: 0 },
-      team: null                // computed by position each tick
+      team: null,
     });
 
     socket.emit("joined", { id: socket.id, n: joinSeq });
@@ -80,13 +95,14 @@ io.on("connection", (socket) => {
     const p = players.get(socket.id);
     if (!p) return;
 
-    const dx = clamp(Number(msg?.dx || 0), -1, 1);
-    const dy = clamp(Number(msg?.dy || 0), -1, 1);
-    p.dir.x = isFinite(dx) ? dx : 0;
-    p.dir.y = isFinite(dy) ? dy : 0;
-
-    if (msg?.action === 1) io.emit("action", { by: p.id, action: 1 });
-    if (msg?.action === 2) io.emit("action", { by: p.id, action: 2 });
+    if (typeof msg.dx === "number" || typeof msg.dy === "number") {
+      const dx = clamp(Number(msg?.dx || 0), -1, 1);
+      const dy = clamp(Number(msg?.dy || 0), -1, 1);
+      p.dir.x = isFinite(dx) ? dx : 0;
+      p.dir.y = isFinite(dy) ? dy : 0;
+    }
+    if (msg?.action === 1) io.volatile.emit("action", { by: p.id, action: 1 });
+    if (msg?.action === 2) io.volatile.emit("action", { by: p.id, action: 2 });
   });
 
   socket.on("disconnect", () => {
@@ -103,38 +119,16 @@ setInterval(() => {
     const m = ARENA.margin;
     p.pos.x = clamp(p.pos.x, m, ARENA.w - m);
     p.pos.y = clamp(p.pos.y, m, ARENA.h - m);
-
-    // Dynamic team assignment by current x position
     const newTeam = p.pos.x < halfX() ? "X" : "O";
     if (newTeam !== p.team) p.team = newTeam;
   }
 }, TICK_MS);
 
 setInterval(() => {
-  io.emit("snapshot", snapshotPayload());
+  io.volatile.emit("snapshot", snapshotPayload());
 }, SNAPSHOT_MS);
 
 /* ---------------- Start ---------------- */
 server.listen(PORT, () => {
   console.log(`Server on http://localhost:${PORT}`);
 });
-
-// --- when you create io ---
-const io = new Server(httpServer, {
-  transports: ["websocket"],
-  perMessageDeflate: false,       // trade a few bytes for lower latency
-  pingInterval: 2500,
-  pingTimeout: 8000,
-});
-
-// --- inside io.on("connection", socket => { ... }) ---
-socket.on("rt", (t0) => {
-  // echo the timestamp back immediately; client computes RTT & clock skew
-  socket.emit("rt", t0, Date.now());
-});
-
-// OPTIONAL: when you broadcast state every tick, make it volatile:
-setInterval(() => {
-  // ...compose your snapshot {players: ...}
-  io.volatile.emit("snapshot", snapshot);   // drop frames if client is slow
-}, 33); // ~30 fps

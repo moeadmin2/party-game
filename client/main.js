@@ -1,28 +1,29 @@
-// Shared boot + socket helper (used by both host and controller)
+// client/main.js
 import { io } from "socket.io-client";
 
-// If you serve client from your Node server, same origin works.
-// You can override with &server=https://public.example.com
+// Use same-origin by default (works when served by Node).
+// If running Vite on a different port, pass &server=http://<PC-IP>:3000
 export const SERVER =
   new URLSearchParams(location.search).get("server") || window.location.origin;
 
 export function socketConnect() {
-  const socket = io(SERVER, { transports: ["websocket"] });
+  const socket = io(SERVER, {
+    transports: ["websocket"],
+  });
   socket.on("connect", () => console.log("Connected to", SERVER));
   socket.on("connect_error", (e) => console.error("Socket error:", e.message));
   return socket;
 }
 
-/* --------- Route by ?role or show a tiny chooser if missing --------- */
+// Route by ?role, or render chooser if missing.
 const role = new URLSearchParams(location.search).get("role");
+const root = document.getElementById("app") || document.body;
 
 if (role === "host") {
   import("./host.js");
 } else if (role === "controller") {
   import("./controller.js");
 } else {
-  // No role provided – render a minimal chooser so we never touch null IDs
-  const root = document.getElementById("app") || document.body;
   root.innerHTML = `
     <div style="display:flex;min-height:100svh;align-items:center;justify-content:center;background:#737373;">
       <div style="display:flex;gap:16px;">
