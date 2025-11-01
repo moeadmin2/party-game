@@ -182,13 +182,31 @@ function buildWelcome(m) {
     joinBtn.disabled = (state.name.trim().length === 0);
   });
 
-  joinBtn.onclick = async () => {
-    state.name = nameInput.value.trim().slice(0, 12);
-    socket.emit("join", { name: state.name, photo: state.photo });
-    await ensureLandscape();
-    try { await navigator.wakeLock?.request?.("screen"); } catch {}
-    // Wait for "joined" to flip screen
-  };
+joinBtn.onclick = async () => {
+  state.name = nameInput.value.trim().slice(0, 12);
+
+  // Optimistically switch UI now (prevents resize-bounce back to welcome)
+  state.screen = "controller";
+  render();
+
+  // Fire the join, then lock orientation (resizes won't kick us back)
+  socket.emit("join", { name: state.name, photo: state.photo });
+  await ensureLandscape();
+  try { await navigator.wakeLock?.request?.("screen"); } catch {}
+
+  // If server doesn't ack within 4s, go back with an error message
+  const started = Date.now();
+  const timer = setInterval(() => {
+    if (state.myId) { clearInterval(timer); return; }
+    if (Date.now() - started > 4000) {
+      clearInterval(timer);
+      alert("Could not join the game.\nCheck the URL’s &server=..., that the server is running on port 3000, and firewall rules.");
+      state.screen = "welcome";
+      render();
+    }
+  }, 200);
+};
+
 }
 
 /* =========================================================================

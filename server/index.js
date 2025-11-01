@@ -1,5 +1,6 @@
 // server/index.js
 const path = require("path");
+const fs = require("fs");
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
@@ -20,14 +21,24 @@ app.use(cors());
 app.use(express.json({ limit: "5mb" })); // base64 photos
 app.use(express.urlencoded({ extended: false }));
 
-// Serve built client if available
-app.use(express.static(path.join(__dirname, "..", "client", "dist")));
+// Basic health check first (explicit path, no wildcard)
 app.get("/health", (_, res) => res.send("OK"));
-app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "..", "client", "dist", "index.html"), (err) => {
-    if (err) res.end(); // dev mode
+
+// Optional static serving if client is built
+const distDir = path.join(__dirname, "..", "client", "dist");
+const hasDist = fs.existsSync(distDir);
+if (hasDist) {
+  app.use(express.static(distDir));
+  // Catch-all for SPA **without** using a wildcard pattern:
+  app.use((req, res, next) => {
+    // Let Socket.IO / API paths pass through
+    if (req.path.startsWith("/socket.io")) return next();
+    if (req.method !== "GET") return next();
+    const indexFile = path.join(distDir, "index.html");
+    if (fs.existsSync(indexFile)) return res.sendFile(indexFile);
+    return next();
   });
-});
+}
 
 const server = http.createServer(app);
 const io = new Server(server, {
