@@ -2,7 +2,7 @@
 import { io } from "socket.io-client";
 
 // If you serve client from your Node server, same origin works.
-// You can override with ?server=https://public.example.com
+// You can override with &server=https://public.example.com
 export const SERVER =
   new URLSearchParams(location.search).get("server") || window.location.origin;
 
@@ -13,10 +13,21 @@ export function socketConnect() {
   return socket;
 }
 
-// Lazy-load the correct module based on button click or ?role=...
-document.getElementById("host").onclick = () => import("./host.js");
-document.getElementById("ctrl").onclick = () => import("./controller.js");
-
+/* --------- Route by ?role or show a tiny chooser if missing --------- */
 const role = new URLSearchParams(location.search).get("role");
-if (role === "host") import("./host.js");
-if (role === "controller") import("./controller.js");
+
+if (role === "host") {
+  import("./host.js");
+} else if (role === "controller") {
+  import("./controller.js");
+} else {
+  // No role provided – render a minimal chooser so we never touch null IDs
+  const root = document.getElementById("app") || document.body;
+  root.innerHTML = `
+    <div style="display:flex;min-height:100svh;align-items:center;justify-content:center;background:#737373;">
+      <div style="display:flex;gap:16px;">
+        <a href="?role=host" style="padding:12px 20px;border-radius:12px;background:#3a6df0;color:#fff;font:600 16px system-ui;text-decoration:none;">Host View</a>
+        <a href="?role=controller" style="padding:12px 20px;border-radius:12px;background:#56e1e6;color:#051018;font:700 16px system-ui;text-decoration:none;">Controller</a>
+      </div>
+    </div>`;
+}

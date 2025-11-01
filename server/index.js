@@ -118,3 +118,23 @@ setInterval(() => {
 server.listen(PORT, () => {
   console.log(`Server on http://localhost:${PORT}`);
 });
+
+// --- when you create io ---
+const io = new Server(httpServer, {
+  transports: ["websocket"],
+  perMessageDeflate: false,       // trade a few bytes for lower latency
+  pingInterval: 2500,
+  pingTimeout: 8000,
+});
+
+// --- inside io.on("connection", socket => { ... }) ---
+socket.on("rt", (t0) => {
+  // echo the timestamp back immediately; client computes RTT & clock skew
+  socket.emit("rt", t0, Date.now());
+});
+
+// OPTIONAL: when you broadcast state every tick, make it volatile:
+setInterval(() => {
+  // ...compose your snapshot {players: ...}
+  io.volatile.emit("snapshot", snapshot);   // drop frames if client is slow
+}, 33); // ~30 fps

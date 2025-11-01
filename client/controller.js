@@ -1,7 +1,16 @@
 import { socketConnect } from "./main.js";
 const socket = socketConnect();
 
-/* ---------- base styles ---------- */
+/* ---------- global UI state ---------- */
+const state = {
+  screen: "welcome",     // "welcome" | "controller"
+  name: "",
+  photo: null,
+  myId: null,
+  mySeq: null,
+  myTeam: null,
+};
+
 document.documentElement.style.background = "#737373";
 document.body.style.margin = "0";
 document.body.style.background = "#737373";
@@ -41,39 +50,66 @@ async function ensureLandscape() {
   return false;
 }
 document.getElementById("forceLandscapeBtn")?.addEventListener("click", ensureLandscape);
-window.addEventListener("orientationchange", ()=> {
-  if (window.matchMedia("(orientation: landscape)").matches) rotateOverlay.style.display = "none";
-  else rotateOverlay.style.display = "flex";
-});
 
-/* ---------- shared state ---------- */
-let myId=null, mySeq=null, myTeam=null;
-
-/* ---------- responsive sizing helpers ---------- */
+/* ---------- responsive metrics ---------- */
 function metrics() {
-  // Use the shorter side to size controls consistently
   const w = window.innerWidth, h = window.innerHeight;
   const s = Math.min(w, h);
   return {
-    // joystick
-    ringR: Math.round(s * 0.20),     // ~40% of short side diameter
+    ringR: Math.round(s * 0.20),
     knobR: Math.round(s * 0.06),
-    // buttons
     btnD:  Math.round(s * 0.22),
-    // fonts
     fBig:  Math.max(16, Math.round(s * 0.045)),
     fMed:  Math.max(14, Math.round(s * 0.035)),
   };
 }
 
-/* =========================================================================
-   WELCOME (name ≤ 12, optional photo) — responsive
-   ========================================================================= */
-function welcomeScreen() {
-  document.body.innerHTML = ""; document.body.appendChild(rotateOverlay);
-
+/* ---------- rebuild the CURRENT screen on resize/orientation ---------- */
+let uiRoot;
+function render() {
   const m = metrics();
+  document.body.innerHTML = "";
+  document.body.appendChild(rotateOverlay);
+  uiRoot = document.createElement("div");
 
+  if (state.screen === "welcome") {
+    buildWelcome(m);
+  } else {
+    buildController(m);
+  }
+  document.body.appendChild(uiRoot);
+
+  // If not landscape, show overlay
+  if (!window.matchMedia("(orientation: landscape)").matches) {
+    rotateOverlay.style.display = "flex";
+  } else {
+    rotateOverlay.style.display = "none";
+  }
+}
+
+// --- with this guarded version ---
+let resizeTimer = null;
+function scheduleRender() {
+  // if user is typing, don't rebuild the DOM
+  const ae = document.activeElement;
+  const typing = ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable);
+  if (typing) return;
+
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => render(), 120);
+}
+
+window.addEventListener("orientationchange", scheduleRender);
+window.addEventListener("resize", scheduleRender);
+// also listen to visualViewport (triggers when soft keyboard opens)
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", scheduleRender);
+}
+
+/* =========================================================================
+   WELCOME
+   ========================================================================= */
+function buildWelcome(m) {
   const box = document.createElement("div");
   box.style.cssText = `
     position:fixed; inset:2svh 2svw; border:6px solid #111; border-radius:28px;
@@ -82,7 +118,7 @@ function welcomeScreen() {
 
   const title = document.createElement("div");
   title.textContent = "Welcome";
-  title.style.cssText = `color:#ff8cc6; font:700 ${Math.round(m.fBig*1.3)}px system-ui; margin-top:0.5vh;`;
+  title.style.cssText = `color:#ff8cc6; font:700 ${Math.round(m.fBig*1.3)}px system-ui;`;
   box.appendChild(title);
 
   // Row 1: Name
@@ -91,6 +127,7 @@ function welcomeScreen() {
   const nameLbl = label(`Name (12 letters max):`, m.fBig);
   const nameInput = document.createElement("input");
   nameInput.maxLength = 12;
+  nameInput.value = state.name || "";
   nameInput.placeholder = "Your name";
   nameInput.style.cssText = `
     width:min(60vw, 560px); padding:1.2em 1.3em; border-radius:28px; border:0;
@@ -105,52 +142,45 @@ function welcomeScreen() {
   const uploadBtn = pill("Upload", m.fMed);
   const file = document.createElement("input"); file.type="file"; file.accept="image/*"; file.capture="user"; file.style.display="none";
   const preview = circleImg(Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.25));
-  row2.append(picLbl, uploadBtn, preview); box.appendChild(row2);
+  if (state.photo) preview.src = state.photo;
+  row2.append(picLbl, uploadBtn, preview);
+  box.appendChild(row2);
 
+  // Join
   const joinBtn = pill("Join", m.fMed);
-  joinBtn.style.background="#3a6df0"; joinBtn.disabled = true;
+  joinBtn.style.background="#3a6df0";
+  joinBtn.disabled = (nameInput.value.trim().length === 0);
   box.appendChild(joinBtn);
 
-  document.body.appendChild(box);
+  uiRoot.appendChild(box);
 
-  let photoDataURL = null;
   uploadBtn.onclick = ()=> file.click();
   file.onchange = async ()=>{
     const f = file.files?.[0]; if (!f) return;
-    photoDataURL = await toSquareDataURL(f, 384); // bigger preview on high-dpi
-    preview.src = photoDataURL;
+    state.photo = await toSquareDataURL(f, 384);
+    preview.src = state.photo;
   };
-  nameInput.addEventListener("input", ()=> { joinBtn.disabled = nameInput.value.trim().length === 0; });
+  nameInput.addEventListener("input", ()=>{
+    state.name = nameInput.value;
+    joinBtn.disabled = (state.name.trim().length === 0);
+  });
 
   joinBtn.onclick = async ()=>{
-    const name = nameInput.value.trim().slice(0,12);
-    socket.emit("join", { name, photo: photoDataURL });
+    state.name = nameInput.value.trim().slice(0,12);
+    socket.emit("join", { name: state.name, photo: state.photo });
+    // Lock orientation AFTER emitting join; the resize that follows won't reset screen
     await ensureLandscape();
     try { await navigator.wakeLock?.request?.("screen"); } catch {}
+    // We do NOT change screen here. We wait for server "joined".
   };
-
-  // Recompute sizes on resize
-  window.onresize = () => welcomeScreen();
 }
-
-socket.on("joined", (info)=>{ myId=info.id; mySeq=info.n; controllerScreen(); });
 
 /* =========================================================================
-   CONTROLLER — responsive joystick + buttons
+   CONTROLLER
    ========================================================================= */
-let text1Ref, text2Ref, teamRef, nameRef, numRef, photoRef, uiRoot, b1, b2;
+let text1Ref, text2Ref, teamRef, nameRef, numRef, photoRef, b1, b2;
 
-function controllerScreen() {
-  document.body.innerHTML = ""; document.body.appendChild(rotateOverlay);
-  uiRoot = document.createElement("div");
-  buildController();  // initial
-  document.body.appendChild(uiRoot);
-  window.onresize = () => { uiRoot.remove(); uiRoot = document.createElement("div"); buildController(); document.body.appendChild(uiRoot); };
-}
-
-function buildController(){
-  const m = metrics();
-
+function buildController(m) {
   uiRoot.style.cssText = `
     position:fixed; inset:2svh 2svw; border:6px solid #111; border-radius:28px;
     display:grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr;
@@ -160,9 +190,10 @@ function buildController(){
   const header = document.createElement("div");
   header.style.cssText = "grid-column:1 / span 2; display:flex; align-items:center; justify-content:center; gap:1.2vw;";
   photoRef = circleImg(Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.28));
+  if (state.photo) photoRef.src = state.photo;
   const meta = document.createElement("div");
   meta.style.cssText = "display:flex; flex-direction:column; align-items:center; gap:0.6vh;";
-  nameRef = divText(m.fBig, "#ff8cc6", 700);
+  nameRef = divText(m.fBig, "#ff8cc6", 700); nameRef.textContent = state.name || "";
   teamRef = divText(Math.round(m.fBig*0.85), "#ff8cc6", 700);
   numRef  = divText(Math.round(m.fBig*0.75), "#ff8cc6", 700);
   meta.append(nameRef, teamRef, numRef); header.append(photoRef, meta); uiRoot.appendChild(header);
@@ -180,7 +211,7 @@ function buildController(){
   const field = document.createElement("div");
   field.style.cssText = `position:relative; width:${m.btnD*2}px; height:${m.btnD*2}px;`;
   b2 = roundBtn("2", m.btnD, m.fBig); b2.style.left = `${m.btnD*0.15}px`; b2.style.top = `${m.btnD*0.9}px`;
-  b1 = roundBtn("1", m.btnD, m.fBig);  b1.style.left = `${m.btnD*0.95}px`; b1.style.top = `${m.btnD*0.1}px`; // NE of 2
+  b1 = roundBtn("1", m.btnD, m.fBig);  b1.style.left = `${m.btnD*0.95}px`; b1.style.top = `${m.btnD*0.1}px`;
   field.append(b2, b1); right.appendChild(field);
   text2Ref = divText(m.fMed, "#111", 600); text2Ref.style.position="absolute"; text2Ref.style.left="0"; text2Ref.style.top="0"; text2Ref.textContent="text2";
   right.appendChild(text2Ref); uiRoot.appendChild(right);
@@ -188,23 +219,35 @@ function buildController(){
   // wire
   b1.addEventListener("pointerdown", ()=>{ text2Ref.textContent="text2: 1"; socket.emit("input", { action:1 }); });
   b2.addEventListener("pointerdown", ()=>{ text2Ref.textContent="text2: 2"; socket.emit("input", { action:2 }); });
+
+  // fill known labels
+  if (state.mySeq != null) numRef.textContent = String(state.mySeq);
+  if (state.myTeam) teamRef.textContent = `Team ${state.myTeam}`;
 }
 
-/* ---------- live updates (team/name/photo) ---------- */
+/* ---------- live server events ---------- */
+socket.on("joined", (info)=>{
+  state.myId = info.id;
+  state.mySeq = info.n;
+  // SWITCH SCREEN once server acknowledges the join
+  state.screen = "controller";
+  render();
+});
+
 socket.on("snapshot", (snap)=>{
-  if (!myId) return;
-  const me = (snap.players || []).find(p => p.id === myId);
+  if (!state.myId) return;
+  const me = (snap.players || []).find(p => p.id === state.myId);
   if (!me) return;
-  myTeam = me.team || null;
-  if (nameRef) nameRef.textContent = me.name || "";
-  if (numRef)  numRef.textContent  = String(me.n ?? "");
-  if (teamRef) teamRef.textContent = myTeam ? `Team ${myTeam}` : "";
+  state.myTeam = me.team || null;
+  if (nameRef) nameRef.textContent = me.name || state.name || "";
+  if (numRef)  numRef.textContent  = String(me.n ?? state.mySeq ?? "");
+  if (teamRef) teamRef.textContent = state.myTeam ? `Team ${state.myTeam}` : "";
   if (me.photo && photoRef && photoRef.getAttribute("data-src") !== me.photo){
     photoRef.src = me.photo; photoRef.setAttribute("data-src", me.photo);
   }
 });
 
-/* ---------- builders ---------- */
+/* ---------- helpers ---------- */
 function label(text, f){ const d=document.createElement("div"); d.textContent=text; d.style.cssText=`color:#111;font:600 ${f}px system-ui;`; return d; }
 function pill(text, f){ const b=document.createElement("button"); b.textContent=text;
   b.style.cssText=`padding:0.8em 1.2em;border:0;border-radius:28px;background:#ffb3d9;color:#111;font:700 ${f}px system-ui;touch-action:none;`; return b; }
@@ -249,9 +292,17 @@ function buildJoystick(m, onText){
   ring.addEventListener("pointerdown", pd); ring.addEventListener("pointermove", pm);
   ring.addEventListener("pointerup", pu); ring.addEventListener("pointercancel", pu); ring.addEventListener("lostpointercapture", pu);
 
-  setInterval(()=>{ const now=performance.now(); if(now-lastSend<32) return; lastSend=now;
-    socket.emit("input",{ dx:Number(dir.x.toFixed(3)), dy:Number(dir.y.toFixed(3)) });
-  },40);
+// replace the setInterval sender in buildJoystick():
+let last = 0, lastDx=0, lastDy=0;
+setInterval(() => {
+  const now = performance.now();
+  const changed = Math.abs(dir.x-lastDx) > 0.02 || Math.abs(dir.y-lastDy) > 0.02;
+  if (now - last >= 30 || changed) {
+    last = now; lastDx = dir.x; lastDy = dir.y;
+    // volatile = OK to drop frames instead of buffering
+    socket.volatile.emit("input", { dx:+dir.x.toFixed(3), dy:+dir.y.toFixed(3) });
+  }
+}, 30);
 
   return wrap;
 }
@@ -269,4 +320,17 @@ const PH="data:image/svg+xml;base64,"+btoa(`<svg xmlns='http://www.w3.org/2000/s
 
 /* ---------- boot ---------- */
 socket.on("connect", ()=>{});
-welcomeScreen();
+socket.on("disconnect", ()=>console.warn("socket disconnected"));
+render(); // start on welcome
+
+let rtt=0, skew=0;
+setInterval(() => socket.emit("rt", Date.now()), 1000);
+socket.on("rt", (t0, tServer) => {
+  const now = Date.now();
+  rtt  = now - t0;                    // round-trip
+  skew = (tServer + rtt/2) - now;     // server clock minus client clock
+  if (text2Ref) text2Ref.textContent = `ping ${rtt} ms`;
+});
+
+b1.addEventListener("pointerdown", ()=>{ text2Ref.textContent=`ping ${rtt} ms`; socket.volatile.emit("input", { action:1 }); });
+b2.addEventListener("pointerdown", ()=>{ text2Ref.textContent=`ping ${rtt} ms`; socket.volatile.emit("input", { action:2 }); });
