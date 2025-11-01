@@ -1,5 +1,4 @@
 import { socketConnect } from "./main.js";
-
 const socket = socketConnect();
 
 /* ---------- base styles ---------- */
@@ -10,18 +9,12 @@ document.body.style.color = "#000";
 document.body.style.font = "16px system-ui";
 document.body.style.touchAction = "none";
 
-/* ---------- keep refs ---------- */
-let myId = null;
-let mySeq = null;
-let myTeam = null;
-
-/* ---------- orientation helpers ---------- */
+/* ---------- orientation prompt + lock ---------- */
 const rotateOverlay = document.createElement("div");
 rotateOverlay.style.cssText = `
   position:fixed; inset:0; display:none; align-items:center; justify-content:center;
-  background:rgba(0,0,0,0.35); z-index:9999; text-align:center; padding:20px;
-  backdrop-filter:saturate(80%) blur(2px); color:#fff;
-`;
+  background:rgba(0,0,0,0.35); z-index:9999; text-align:center; padding:20px; color:#fff;
+  backdrop-filter:saturate(80%) blur(2px);`;
 rotateOverlay.innerHTML = `
   <div style="background:#222;border-radius:16px;padding:18px 22px;max-width:480px;">
     <div style="font:600 18px system-ui; margin-bottom:6px">Rotate to Landscape</div>
@@ -36,7 +29,7 @@ async function ensureLandscape() {
   try {
     const el = document.documentElement;
     if (!document.fullscreenElement && el.requestFullscreen) {
-      await el.requestFullscreen({ navigationUI: "hide" }).catch(() => {});
+      await el.requestFullscreen({ navigationUI: "hide" }).catch(()=>{});
     }
     if (screen.orientation?.lock) {
       await screen.orientation.lock("landscape");
@@ -48,272 +41,232 @@ async function ensureLandscape() {
   return false;
 }
 document.getElementById("forceLandscapeBtn")?.addEventListener("click", ensureLandscape);
+window.addEventListener("orientationchange", ()=> {
+  if (window.matchMedia("(orientation: landscape)").matches) rotateOverlay.style.display = "none";
+  else rotateOverlay.style.display = "flex";
+});
+
+/* ---------- shared state ---------- */
+let myId=null, mySeq=null, myTeam=null;
+
+/* ---------- responsive sizing helpers ---------- */
+function metrics() {
+  // Use the shorter side to size controls consistently
+  const w = window.innerWidth, h = window.innerHeight;
+  const s = Math.min(w, h);
+  return {
+    // joystick
+    ringR: Math.round(s * 0.20),     // ~40% of short side diameter
+    knobR: Math.round(s * 0.06),
+    // buttons
+    btnD:  Math.round(s * 0.22),
+    // fonts
+    fBig:  Math.max(16, Math.round(s * 0.045)),
+    fMed:  Math.max(14, Math.round(s * 0.035)),
+  };
+}
 
 /* =========================================================================
-   SCREEN 1: WELCOME (name ≤ 12, optional photo)
+   WELCOME (name ≤ 12, optional photo) — responsive
    ========================================================================= */
 function welcomeScreen() {
-  document.body.innerHTML = "";
-  document.body.appendChild(rotateOverlay);
+  document.body.innerHTML = ""; document.body.appendChild(rotateOverlay);
+
+  const m = metrics();
 
   const box = document.createElement("div");
   box.style.cssText = `
-    position:fixed; inset:24px; border:6px solid #111; border-radius:28px;
-    display:flex; flex-direction:column; align-items:center; justify-content:flex-start; padding:28px; gap:28px;
-    background:#737373;
-  `;
+    position:fixed; inset:2svh 2svw; border:6px solid #111; border-radius:28px;
+    display:flex; flex-direction:column; align-items:center; justify-content:flex-start;
+    gap:2vh; padding:2vh; background:#737373;`;
+
   const title = document.createElement("div");
   title.textContent = "Welcome";
-  title.style.cssText = "color:#ff8cc6; font:700 40px system-ui; margin-top:4px;";
+  title.style.cssText = `color:#ff8cc6; font:700 ${Math.round(m.fBig*1.3)}px system-ui; margin-top:0.5vh;`;
   box.appendChild(title);
 
-  // Form rows
+  // Row 1: Name
   const row1 = document.createElement("div");
-  row1.style.cssText = "display:flex; gap:20px; align-items:center; width:90%; justify-content:center;";
-  const nameLbl = pillLabel("Name (12 letters max):");
+  row1.style.cssText = "display:flex; gap:2vw; align-items:center; width:90%; justify-content:center; flex-wrap:wrap;";
+  const nameLbl = label(`Name (12 letters max):`, m.fBig);
   const nameInput = document.createElement("input");
   nameInput.maxLength = 12;
   nameInput.placeholder = "Your name";
-  nameInput.style.cssText = "width:520px; padding:16px 18px; border-radius:28px; border:0; background:#ffb3d9; color:#111; font:600 20px system-ui;";
+  nameInput.style.cssText = `
+    width:min(60vw, 560px); padding:1.2em 1.3em; border-radius:28px; border:0;
+    background:#ffb3d9; color:#111; font:600 ${m.fMed}px system-ui;`;
   row1.append(nameLbl, nameInput);
   box.appendChild(row1);
 
+  // Row 2: Photo
   const row2 = document.createElement("div");
-  row2.style.cssText = "display:flex; gap:24px; align-items:center; width:90%; justify-content:center;";
-  const picLbl = pillLabel("Picture (optional):");
-  const uploadBtn = pillButton("Upload");
-  const file = document.createElement("input");
-  file.type = "file";
-  file.accept = "image/*";
-  file.capture = "user";
-  file.style.display = "none";
+  row2.style.cssText = "display:flex; gap:2vw; align-items:center; width:90%; justify-content:center; flex-wrap:wrap;";
+  const picLbl = label("Picture (optional):", m.fBig);
+  const uploadBtn = pill("Upload", m.fMed);
+  const file = document.createElement("input"); file.type="file"; file.accept="image/*"; file.capture="user"; file.style.display="none";
+  const preview = circleImg(Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.25));
+  row2.append(picLbl, uploadBtn, preview); box.appendChild(row2);
 
-  const preview = circleImg(180); // circular preview
-  row2.append(picLbl, uploadBtn, preview);
-  box.appendChild(row2);
-
-  const joinBtn = pillButton("Join");
-  joinBtn.style.background = "#3a6df0";
-  joinBtn.style.marginTop = "8px";
-  joinBtn.disabled = true;
+  const joinBtn = pill("Join", m.fMed);
+  joinBtn.style.background="#3a6df0"; joinBtn.disabled = true;
   box.appendChild(joinBtn);
 
   document.body.appendChild(box);
 
   let photoDataURL = null;
-
-  uploadBtn.onclick = () => file.click();
-  file.onchange = async () => {
-    const f = file.files?.[0];
-    if (!f) return;
-    photoDataURL = await toSquareDataURL(f, 256);
+  uploadBtn.onclick = ()=> file.click();
+  file.onchange = async ()=>{
+    const f = file.files?.[0]; if (!f) return;
+    photoDataURL = await toSquareDataURL(f, 384); // bigger preview on high-dpi
     preview.src = photoDataURL;
   };
+  nameInput.addEventListener("input", ()=> { joinBtn.disabled = nameInput.value.trim().length === 0; });
 
-  nameInput.addEventListener("input", () => {
-    joinBtn.disabled = nameInput.value.trim().length === 0;
-  });
-
-  joinBtn.onclick = async () => {
-    const name = nameInput.value.trim().slice(0, 12);
+  joinBtn.onclick = async ()=>{
+    const name = nameInput.value.trim().slice(0,12);
     socket.emit("join", { name, photo: photoDataURL });
     await ensureLandscape();
     try { await navigator.wakeLock?.request?.("screen"); } catch {}
-    // wait for "joined" to flip to game screen
   };
+
+  // Recompute sizes on resize
+  window.onresize = () => welcomeScreen();
 }
 
-socket.on("joined", (info) => {
-  myId = info.id;
-  mySeq = info.n;
-  gameScreen(); // switch to controller UI
-});
+socket.on("joined", (info)=>{ myId=info.id; mySeq=info.n; controllerScreen(); });
 
 /* =========================================================================
-   SCREEN 2: CONTROLLER (joystick + two buttons + profile)
+   CONTROLLER — responsive joystick + buttons
    ========================================================================= */
-let text1Ref, text2Ref, teamRef, nameRef, numRef, photoRef;
+let text1Ref, text2Ref, teamRef, nameRef, numRef, photoRef, uiRoot, b1, b2;
 
-function gameScreen() {
-  document.body.innerHTML = "";
-  document.body.appendChild(rotateOverlay);
+function controllerScreen() {
+  document.body.innerHTML = ""; document.body.appendChild(rotateOverlay);
+  uiRoot = document.createElement("div");
+  buildController();  // initial
+  document.body.appendChild(uiRoot);
+  window.onresize = () => { uiRoot.remove(); uiRoot = document.createElement("div"); buildController(); document.body.appendChild(uiRoot); };
+}
 
-  const root = document.createElement("div");
-  root.style.cssText = `
-    position:fixed; inset:24px; border:6px solid #111; border-radius:28px;
+function buildController(){
+  const m = metrics();
+
+  uiRoot.style.cssText = `
+    position:fixed; inset:2svh 2svw; border:6px solid #111; border-radius:28px;
     display:grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr;
-    gap:10px; padding:18px; background:#737373;
-  `;
+    gap:1.2vh; padding:1.2vh; background:#737373;`;
 
-  // Profile header (center column span)
+  // Header
   const header = document.createElement("div");
-  header.style.cssText = "grid-column: 1 / span 2; display:flex; align-items:center; justify-content:center; gap:18px;";
-  photoRef = circleImg(180);
+  header.style.cssText = "grid-column:1 / span 2; display:flex; align-items:center; justify-content:center; gap:1.2vw;";
+  photoRef = circleImg(Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.28));
   const meta = document.createElement("div");
-  meta.style.cssText = "display:flex; flex-direction:column; align-items:center; gap:8px;";
-  nameRef = document.createElement("div");
-  nameRef.style.cssText = "font:700 34px system-ui; color:#ff8cc6";
-  teamRef = document.createElement("div");
-  teamRef.style.cssText = "font:700 28px system-ui; color:#ff8cc6";
-  numRef = document.createElement("div");
-  numRef.style.cssText = "font:700 24px system-ui; color:#ff8cc6";
-  meta.append(nameRef, teamRef, numRef);
-  header.append(photoRef, meta);
-  root.appendChild(header);
+  meta.style.cssText = "display:flex; flex-direction:column; align-items:center; gap:0.6vh;";
+  nameRef = divText(m.fBig, "#ff8cc6", 700);
+  teamRef = divText(Math.round(m.fBig*0.85), "#ff8cc6", 700);
+  numRef  = divText(Math.round(m.fBig*0.75), "#ff8cc6", 700);
+  meta.append(nameRef, teamRef, numRef); header.append(photoRef, meta); uiRoot.appendChild(header);
 
-  // Left: joystick + text1
+  // Left: joystick
   const left = document.createElement("div");
-  left.style.cssText = "display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px;";
-  const joy = buildJoystick((info) => { text1Ref.textContent = info; }); // updates text1
-  text1Ref = document.createElement("div");
-  text1Ref.style.cssText = "font:600 18px system-ui; color:#111";
-  text1Ref.textContent = "text1";
-  left.append(joy, text1Ref);
-  root.appendChild(left);
+  left.style.cssText = "display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1vh;";
+  const joy = buildJoystick(m, (info)=>{ text1Ref.textContent = info; });
+  text1Ref = divText(m.fMed, "#111", 600); text1Ref.textContent = "text1";
+  left.append(joy, text1Ref); uiRoot.appendChild(left);
 
-  // Right: buttons + text2
+  // Right: buttons
   const right = document.createElement("div");
   right.style.cssText = "position:relative; display:flex; align-items:center; justify-content:center;";
   const field = document.createElement("div");
-  field.style.cssText = "position:relative; width:320px; height:320px;";
-  const b2 = roundBtn("2"); b2.style.left = "60px";  b2.style.top = "150px";
-  const b1 = roundBtn("1"); b1.style.left = "180px"; b1.style.top = "40px"; // NE of 2
-  field.append(b2, b1);
-  right.appendChild(field);
+  field.style.cssText = `position:relative; width:${m.btnD*2}px; height:${m.btnD*2}px;`;
+  b2 = roundBtn("2", m.btnD, m.fBig); b2.style.left = `${m.btnD*0.15}px`; b2.style.top = `${m.btnD*0.9}px`;
+  b1 = roundBtn("1", m.btnD, m.fBig);  b1.style.left = `${m.btnD*0.95}px`; b1.style.top = `${m.btnD*0.1}px`; // NE of 2
+  field.append(b2, b1); right.appendChild(field);
+  text2Ref = divText(m.fMed, "#111", 600); text2Ref.style.position="absolute"; text2Ref.style.left="0"; text2Ref.style.top="0"; text2Ref.textContent="text2";
+  right.appendChild(text2Ref); uiRoot.appendChild(right);
 
-  text2Ref = document.createElement("div");
-  text2Ref.style.cssText = "position:absolute; left:0; top:0; font:600 18px system-ui; color:#111";
-  text2Ref.textContent = "text2";
-  right.appendChild(text2Ref);
-
-  root.appendChild(right);
-  document.body.appendChild(root);
-
-  // wire actions
-  b1.addEventListener("pointerdown", () => { text2Ref.textContent = "text2: 1"; socket.emit("input", { action: 1 }); });
-  b2.addEventListener("pointerdown", () => { text2Ref.textContent = "text2: 2"; socket.emit("input", { action: 2 }); });
+  // wire
+  b1.addEventListener("pointerdown", ()=>{ text2Ref.textContent="text2: 1"; socket.emit("input", { action:1 }); });
+  b2.addEventListener("pointerdown", ()=>{ text2Ref.textContent="text2: 2"; socket.emit("input", { action:2 }); });
 }
 
-/* ---------- live updates from server (team/name/photo) ---------- */
-socket.on("snapshot", (snap) => {
+/* ---------- live updates (team/name/photo) ---------- */
+socket.on("snapshot", (snap)=>{
   if (!myId) return;
   const me = (snap.players || []).find(p => p.id === myId);
   if (!me) return;
   myTeam = me.team || null;
-
   if (nameRef) nameRef.textContent = me.name || "";
-  if (numRef) numRef.textContent = String(me.n ?? "");
+  if (numRef)  numRef.textContent  = String(me.n ?? "");
   if (teamRef) teamRef.textContent = myTeam ? `Team ${myTeam}` : "";
-  if (me.photo && photoRef && photoRef.getAttribute("data-src") !== me.photo) {
-    photoRef.src = me.photo;
-    photoRef.setAttribute("data-src", me.photo);
+  if (me.photo && photoRef && photoRef.getAttribute("data-src") !== me.photo){
+    photoRef.src = me.photo; photoRef.setAttribute("data-src", me.photo);
   }
 });
 
-/* ---------- UI builders ---------- */
-function pillLabel(text) {
-  const d = document.createElement("div");
-  d.textContent = text;
-  d.style.cssText = "color:#111; font:600 40px system-ui;";
-  return d;
-}
-function pillButton(text) {
-  const b = document.createElement("button");
-  b.textContent = text;
-  b.style.cssText = "padding:14px 22px; border:0; border-radius:28px; background:#ffb3d9; color:#111; font:700 20px system-ui;";
-  b.style.touchAction = "none";
-  return b;
-}
-function circleImg(sz) {
-  const img = document.createElement("img");
-  img.width = img.height = sz;
-  img.style.cssText = `width:${sz}px;height:${sz}px;border-radius:50%;object-fit:cover;border:3px solid #111;background:#eee`;
-  img.src = PH;
-  return img;
-}
-function roundBtn(label){
-  const b = document.createElement("button");
-  b.textContent = label;
-  b.style.cssText = `
-    position:absolute;width:150px;height:150px;border-radius:50%;border:0;background:#45a5ff;
-    color:#051018;font:bold 34px system-ui;box-shadow:0 8px 20px rgba(0,0,0,0.35);touch-action:none;user-select:none;
-  `;
-  b.addEventListener("pointerdown", ()=>{ b.animate([{transform:'scale(1)'},{transform:'scale(0.94)'},{transform:'scale(1)'}],{duration:120}); try{navigator.vibrate?.(20);}catch{} });
-  return b;
-}
+/* ---------- builders ---------- */
+function label(text, f){ const d=document.createElement("div"); d.textContent=text; d.style.cssText=`color:#111;font:600 ${f}px system-ui;`; return d; }
+function pill(text, f){ const b=document.createElement("button"); b.textContent=text;
+  b.style.cssText=`padding:0.8em 1.2em;border:0;border-radius:28px;background:#ffb3d9;color:#111;font:700 ${f}px system-ui;touch-action:none;`; return b; }
+function circleImg(sz){ const img=document.createElement("img"); img.width=img.height=sz;
+  img.style.cssText=`width:${sz}px;height:${sz}px;border-radius:50%;object-fit:cover;border:3px solid #111;background:#eee`; img.src=PH; return img; }
+function divText(f, color, weight){ const d=document.createElement("div"); d.style.cssText=`font:${weight} ${f}px system-ui;color:${color}`; return d; }
+function roundBtn(label, d, f){ const b=document.createElement("button"); b.textContent=label;
+  b.style.cssText=`position:absolute;width:${d}px;height:${d}px;border-radius:50%;border:0;background:#45a5ff;color:#051018;font:bold ${Math.round(f*0.85)}px system-ui;box-shadow:0 8px 20px rgba(0,0,0,0.35);touch-action:none;user-select:none;`; 
+  b.addEventListener("pointerdown", ()=>{ b.animate([{transform:'scale(1)'},{transform:'scale(0.94)'},{transform:'scale(1)'}],{duration:120}); try{navigator.vibrate?.(20);}catch{} }); return b; }
 
-function buildJoystick(onText) {
-  const wrap = document.createElement("div");
-  wrap.style.cssText = "display:flex; align-items:center; justify-content:center;";
+function buildJoystick(m, onText){
+  const wrap=document.createElement("div"); wrap.style.cssText="display:flex;align-items:center;justify-content:center;";
+  const R = m.ringR, KN = m.knobR;
+  const ring=document.createElement("div");
+  ring.style.cssText=`position:relative;width:${R*2}px;height:${R*2}px;border-radius:50%;box-sizing:border-box;border:10px solid #56e1e6;background:transparent;`;
+  const centerDot=document.createElement("div");
+  centerDot.style.cssText="position:absolute;left:50%;top:50%;width:10px;height:10px;background:#ff2d2d;border-radius:50%;transform:translate(-50%,-50%);";
+  const stick=document.createElement("div");
+  stick.style.cssText="position:absolute;left:50%;top:50%;width:6px;height:0px;background:black;border-radius:3px;transform-origin:50% 100%;transform:translate(-50%,-100%) rotate(0rad);";
+  const knob=document.createElement("div");
+  knob.style.cssText=`position:absolute;width:${KN*2}px;height:${KN*2}px;border-radius:50%;background:#ff8cc6;left:50%;top:50%;transform:translate(-50%,-50%);`;
+  ring.append(centerDot, stick, knob); wrap.appendChild(ring);
 
-  const RING_R = 95, KNOB_R = 28;
-  const ring = document.createElement("div");
-  ring.style.cssText = `position:relative;width:${RING_R*2}px;height:${RING_R*2}px;border-radius:50%;
-                        box-sizing:border-box;border:10px solid #56e1e6;background:transparent;`;
-  const centerDot = document.createElement("div");
-  centerDot.style.cssText = "position:absolute;left:50%;top:50%;width:10px;height:10px;background:#ff2d2d;border-radius:50%;transform:translate(-50%,-50%);";
-  const stick = document.createElement("div");
-  stick.style.cssText = "position:absolute;left:50%;top:50%;width:6px;height:0px;background:black;border-radius:3px;transform-origin:50% 100%;transform:translate(-50%,-100%) rotate(0rad);";
-  const knob = document.createElement("div");
-  knob.style.cssText = `position:absolute;width:${KNOB_R*2}px;height:${KNOB_R*2}px;border-radius:50%;background:#ff8cc6;left:50%;top:50%;transform:translate(-50%,-50%);`;
-  ring.append(centerDot, stick, knob);
-  wrap.appendChild(ring);
+  const MAX_R=R; let dir={x:0,y:0}, dragging=false, lastSend=0;
+  const rect=()=>ring.getBoundingClientRect(); const center=()=>{ const r=rect(); return {cx:r.left+r.width/2, cy:r.top+r.height/2}; };
+  const setKnob=(px,py)=>{ knob.style.left=`${px}px`; knob.style.top=`${py}px`; };
+  const resetKnob=()=>{ knob.style.left="50%"; knob.style.top="50%"; stick.style.height="0px"; stick.style.transform="translate(-50%,-100%) rotate(0rad)"; onText?.("text1"); };
 
-  const MAX_R = RING_R;
-  let dir = { x: 0, y: 0 }, dragging = false, lastSend = 0;
-
-  const rect = () => ring.getBoundingClientRect();
-  const center = () => { const r = rect(); return { cx: r.left + r.width/2, cy: r.top + r.height/2 }; };
-  const setKnob = (px,py)=>{ knob.style.left = `${px}px`; knob.style.top = `${py}px`; };
-  const resetKnob = ()=>{ knob.style.left = "50%"; knob.style.top = "50%"; stick.style.height = "0px"; stick.style.transform = "translate(-50%,-100%) rotate(0rad)"; onText?.("text1"); };
-
-  function onPointer(e) {
-    const { cx, cy } = center();
-    const x = e.clientX - cx, y = e.clientY - cy;
-    const dist = Math.hypot(x, y), ang = Math.atan2(y, x);
-    const cl = Math.min(dist, MAX_R), nx = Math.cos(ang)*cl, ny = Math.sin(ang)*cl;
-
-    const r = rect(); setKnob(nx + r.width/2, ny + r.height/2);
-    stick.style.height = `${cl}px`; stick.style.transform = `translate(-50%,-100%) rotate(${ang + Math.PI/2}rad)`;
-
+  function onPointer(e){
+    const {cx,cy}=center(); const x=e.clientX-cx, y=e.clientY-cy;
+    const dist=Math.hypot(x,y), ang=Math.atan2(y,x); const cl=Math.min(dist,MAX_R);
+    const nx=Math.cos(ang)*cl, ny=Math.sin(ang)*cl;
+    const r=rect(); setKnob(nx+r.width/2, ny+r.height/2);
+    stick.style.height=`${cl}px`; stick.style.transform=`translate(-50%,-100%) rotate(${ang+Math.PI/2}rad)`;
     dir.x = nx / MAX_R; dir.y = ny / MAX_R;
-    let deg = ang * 180 / Math.PI; if (deg < 0) deg += 360;
-    const mag = cl / MAX_R;
+    let deg=ang*180/Math.PI; if (deg<0) deg+=360; const mag=cl/MAX_R;
     onText?.(`text1: ${deg.toFixed(0)}° | mag ${mag.toFixed(2)} | dx ${dir.x.toFixed(2)} dy ${dir.y.toFixed(2)}`);
   }
+  function pd(e){ dragging=true; ring.setPointerCapture?.(e.pointerId); onPointer(e); }
+  function pm(e){ if(dragging) onPointer(e); }
+  function pu(){ dragging=false; dir={x:0,y:0}; resetKnob(); }
+  ring.addEventListener("pointerdown", pd); ring.addEventListener("pointermove", pm);
+  ring.addEventListener("pointerup", pu); ring.addEventListener("pointercancel", pu); ring.addEventListener("lostpointercapture", pu);
 
-  function pd(e){ dragging = true; ring.setPointerCapture?.(e.pointerId); onPointer(e); }
-  function pm(e){ if (dragging) onPointer(e); }
-  function pu(){ dragging = false; dir = {x:0,y:0}; resetKnob(); }
-
-  ring.addEventListener("pointerdown", pd);
-  ring.addEventListener("pointermove", pm);
-  ring.addEventListener("pointerup", pu);
-  ring.addEventListener("pointercancel", pu);
-  ring.addEventListener("lostpointercapture", pu);
-
-  setInterval(()=> {
-    const now = performance.now();
-    if (now - lastSend < 32) return;
-    lastSend = now;
-    socket.emit("input", { dx: Number(dir.x.toFixed(3)), dy: Number(dir.y.toFixed(3)) });
-  }, 40);
+  setInterval(()=>{ const now=performance.now(); if(now-lastSend<32) return; lastSend=now;
+    socket.emit("input",{ dx:Number(dir.x.toFixed(3)), dy:Number(dir.y.toFixed(3)) });
+  },40);
 
   return wrap;
 }
 
-/* ---------- utils ---------- */
-async function toSquareDataURL(file, size = 256) {
-  const img = new Image(); img.src = URL.createObjectURL(file); await img.decode();
-  const s = Math.min(img.width, img.height); const c = document.createElement("canvas"); c.width = c.height = size;
-  const g = c.getContext("2d");
-  g.drawImage(img, (img.width - s)/2, (img.height - s)/2, s, s, 0, 0, size, size);
-  return c.toDataURL("image/jpeg", 0.8);
+/* ---------- photo util ---------- */
+async function toSquareDataURL(file, size=384){
+  const img=new Image(); img.src=URL.createObjectURL(file); await img.decode();
+  const s=Math.min(img.width,img.height); const c=document.createElement("canvas"); c.width=c.height=size;
+  const g=c.getContext("2d"); g.drawImage(img,(img.width-s)/2,(img.height-s)/2,s,s,0,0,size,size);
+  return c.toDataURL("image/jpeg",0.85);
 }
-const PH = "data:image/svg+xml;base64," + btoa(`<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'>
+const PH="data:image/svg+xml;base64,"+btoa(`<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'>
   <rect width='200' height='200' fill='#eee'/><circle cx='100' cy='84' r='36' fill='#d7d7d7'/><rect x='52' y='124' rx='20' width='96' height='40' fill='#d7d7d7'/>
 </svg>`);
 
 /* ---------- boot ---------- */
-socket.on("connect", () => { /* noop; UI builds immediately */ });
+socket.on("connect", ()=>{});
 welcomeScreen();
