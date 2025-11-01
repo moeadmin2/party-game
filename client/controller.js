@@ -16,7 +16,7 @@ const pid = getPid();
 
 /* ---------- global state ---------- */
 const state = {
-  screen: "welcome",   // "welcome" | "controller"
+  screen: "welcome",
   name: "",
   photo: null,
   myId: null,
@@ -24,7 +24,6 @@ const state = {
   myTeam: null,
 };
 
-/* ---------- shared UI refs ---------- */
 let uiRoot;
 let text1Ref, text2Ref, teamRef, nameRef, numRef, photoRef, b1, b2;
 
@@ -34,40 +33,23 @@ document.body.style.background = "#737373";
 document.body.style.color = "#000";
 document.body.style.font = "16px system-ui";
 
-/* ---------- orientation prompt + lock ---------- */
+/* ---------- orientation prompt ---------- */
 const rotateOverlay = document.createElement("div");
 rotateOverlay.style.cssText = `
   position:fixed; inset:0; display:none; align-items:center; justify-content:center;
-  background:rgba(0,0,0,0.35); z-index:9999; text-align:center; padding:20px; color:#fff;
-  backdrop-filter:saturate(80%) blur(2px);`;
+  background:rgba(0,0,0,0.35); z-index:9999; text-align:center; padding:20px; color:#fff;`;
 rotateOverlay.innerHTML = `
   <div style="background:#222;border-radius:16px;padding:18px 22px;max-width:480px;">
     <div style="font:600 18px system-ui; margin-bottom:6px">Rotate to Landscape</div>
-    <div style="font:14px system-ui; color:#ddd; margin-bottom:12px">For best control, use <b>landscape</b>.</div>
-    <button id="forceLandscapeBtn" style="padding:10px 14px;border:0;border-radius:10px;background:#3a6df0;color:#fff;font-weight:600">
-      Try Force Landscape
-    </button>
+    <div style="font:14px system-ui; color:#ddd;">For best control, use <b>landscape</b>.</div>
   </div>`;
 document.body.appendChild(rotateOverlay);
 
-async function ensureLandscape() {
-  try {
-    const el = document.documentElement;
-    if (!document.fullscreenElement && el.requestFullscreen) {
-      await el.requestFullscreen({ navigationUI: "hide" }).catch(()=>{});
-    }
-    if (screen.orientation?.lock) {
-      await screen.orientation.lock("landscape");
-      rotateOverlay.style.display = "none";
-      return true;
-    }
-  } catch {}
-  if (!window.matchMedia("(orientation: landscape)").matches) rotateOverlay.style.display = "flex";
-  return false;
+function ensureLandscapeOverlay() {
+  rotateOverlay.style.display = window.matchMedia("(orientation: landscape)").matches ? "none" : "flex";
 }
-document.getElementById("forceLandscapeBtn")?.addEventListener("click", ensureLandscape);
 
-/* ---------- responsive metrics ---------- */
+/* ---------- sizing ---------- */
 function metrics() {
   const w = window.innerWidth, h = window.innerHeight;
   const s = Math.min(w, h);
@@ -79,13 +61,8 @@ function metrics() {
     fMed:  Math.max(14, Math.round(s * 0.035)),
   };
 }
-
-/* ---------- guarded re-render on resize ---------- */
 let resizeTimer = null;
 function scheduleRender() {
-  const ae = document.activeElement;
-  const typing = ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable);
-  if (typing) return;
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => render(), 120);
 }
@@ -93,48 +70,42 @@ window.addEventListener("orientationchange", scheduleRender);
 window.addEventListener("resize", scheduleRender);
 if (window.visualViewport) window.visualViewport.addEventListener("resize", scheduleRender);
 
-/* ---------- RTT/Ping ---------- */
+/* ---------- RTT ---------- */
 let rtt = 0;
 setInterval(() => socket.emit("rt", Date.now()), 1000);
 socket.on("rt", (t0) => {
-  const now = Date.now();
-  rtt = now - t0;
+  rtt = Date.now() - t0;
   if (text2Ref) text2Ref.textContent = `ping ${rtt} ms`;
 });
 
-/* ---------- socket lifecycle ---------- */
+/* ---------- lifecycle ---------- */
 socket.on("connect", () => {
-  // If we already joined before, ask server to resume this pid.
   if (state.mySeq != null || state.name) {
     socket.emit("resume", pid);
-    // Make sure latest photo is known by server/host after resume.
-    if (state.photo) socket.emit("photo", { pid, photo: state.photo });
+  }
+});
+socket.on("disconnect", () => {
+  console.warn("socket disconnected; will resume on reconnect…");
+});
+
+socket.on("joined", (info) => {
+  state.myId = info.id;
+  // If we had chosen a photo before joined ack, re-send as texture to force host to see it
+  if (state.photo) {
+    socket.emit("addtexture", { data: state.photo });
   }
 });
 
-socket.on("disconnect", () => {
-  console.warn("socket disconnected; waiting to resume…");
-});
-
-socket.on("joined", (info)=>{
-  state.myId = info.id;
-  state.mySeq = info.n;
-  // Re-send photo once we have an id/seq so host definitely gets it
-  if (state.photo) socket.emit("photo", { pid, photo: state.photo });
-  if (state.screen !== "controller") { state.screen = "controller"; }
-  render();
-});
-
-socket.on("snapshot", (snap)=>{
+socket.on("snapshot", (snap) => {
   if (!state.myId) return;
   const me = (snap.players || []).find(p => p.id === state.myId);
   if (!me) return;
   state.myTeam = me.team || null;
-  if (nameRef) nameRef.textContent = me.name || state.name || "";
-  if (numRef)  numRef.textContent  = String(me.n ?? state.mySeq ?? "");
+  if (nameRef) nameRef.textContent = state.name || "";
+  if (numRef)  numRef.textContent  = String(state.mySeq ?? "");
   if (teamRef) teamRef.textContent = state.myTeam ? `Team ${state.myTeam}` : "";
-  if (me.photo && photoRef && photoRef.getAttribute("data-src") !== me.photo){
-    photoRef.src = me.photo; photoRef.setAttribute("data-src", me.photo);
+  if (photoRef && state.photo && photoRef.getAttribute("data-src") !== state.photo) {
+    photoRef.src = state.photo; photoRef.setAttribute("data-src", state.photo);
   }
 });
 
@@ -149,18 +120,15 @@ function render() {
   else buildController(m);
 
   document.body.appendChild(uiRoot);
-  if (!window.matchMedia("(orientation: landscape)").matches) rotateOverlay.style.display = "flex";
-  else rotateOverlay.style.display = "none";
+  ensureLandscapeOverlay();
 }
 
-/* =========================================================================
-   WELCOME
-   ========================================================================= */
+/* ===== UI bits ===== */
 function label(text, f){ const d=document.createElement("div"); d.textContent=text; d.style.cssText=`color:#111;font:600 ${f}px system-ui;`; return d; }
 function pill(text, f){ const b=document.createElement("button"); b.textContent=text;
   b.style.cssText=`padding:0.8em 1.2em;border:0;border-radius:28px;background:#ffb3d9;color:#111;font:700 ${f}px system-ui;touch-action:auto;`; return b; }
 function circleImg(sz){ const img=document.createElement("img"); img.width=img.height=sz;
-  img.style.cssText=`width:${sz}px;height:${sz}px;border-radius:50%;object-fit:cover;border:3px solid #111;background:#eee`; img.src=PH; return img; }
+  img.style.cssText=`width:${sz}px;height:${sz}px;border-radius:50%;object-fit:cover;border:3px solid #111;background:#eee`; return img; }
 
 function buildWelcome(m) {
   document.body.style.touchAction = "auto";
@@ -176,7 +144,7 @@ function buildWelcome(m) {
   title.style.cssText = `color:#ff8cc6; font:700 ${Math.round(m.fBig*1.3)}px system-ui;`;
   box.appendChild(title);
 
-  // Row 1: Name
+  // name
   const row1 = document.createElement("div");
   row1.style.cssText = "display:flex; gap:2vw; align-items:center; width:90%; justify-content:center; flex-wrap:wrap;";
   const nameLbl = label(`Name (12 letters max):`, m.fBig);
@@ -187,31 +155,28 @@ function buildWelcome(m) {
   nameInput.autocomplete = "off";
   nameInput.inputMode = "text";
   nameInput.spellcheck = false;
-  nameInput.enterKeyHint = "done";
-  nameInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); nameInput.blur(); }
-  });
+  nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); nameInput.blur(); }});
   nameInput.style.cssText = `
     width:min(60vw, 560px); padding:1.2em 1.3em; border-radius:28px; border:0;
     background:#ffb3d9; color:#111; font:600 ${m.fMed}px system-ui;`;
   row1.append(nameLbl, nameInput);
   box.appendChild(row1);
 
-  // Row 2: Photo (allow camera or gallery)
+  // photo
   const row2 = document.createElement("div");
   row2.style.cssText = "display:flex; gap:2vw; align-items:center; width:90%; justify-content:center; flex-wrap:wrap;";
   const picLbl = label("Picture (optional):", m.fBig);
   const uploadBtn = pill("Upload", m.fMed);
   const file = document.createElement("input");
   file.type = "file";
-  file.accept = "image/*";         // camera or gallery
+  file.accept = "image/*";
   file.style.display = "none";
   const preview = circleImg(Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.25));
   if (state.photo) preview.src = state.photo;
   row2.append(picLbl, uploadBtn, preview);
   box.appendChild(row2);
 
-  // Join
+  // join
   const joinBtn = pill("Join", m.fMed);
   joinBtn.style.background = "#3a6df0";
   joinBtn.disabled = (nameInput.value.trim().length === 0);
@@ -224,8 +189,9 @@ function buildWelcome(m) {
     const f = file.files?.[0]; if (!f) return;
     state.photo = await toSquareDataURL(f, 384);
     preview.src = state.photo;
-    // NEW: immediately tell server so host can update even before/after join
-    socket.emit("photo", { pid, photo: state.photo });
+
+    // Immediately push to server as a texture so host updates right away
+    socket.emit("addtexture", { data: state.photo });
   };
 
   nameInput.addEventListener("input", () => {
@@ -235,42 +201,20 @@ function buildWelcome(m) {
 
   joinBtn.onclick = async () => {
     state.name = nameInput.value.trim().slice(0, 12);
-
-    // Optimistically switch to controller (prevents resize bounce)
     state.screen = "controller";
     render();
 
-    // Send join with persistent pid (+photo if present)
-    socket.emit("join", { pid, name: state.name, photo: state.photo || null });
-
-    // Orientation/screen lock after sending
-    await ensureLandscape();
-    try { await navigator.wakeLock?.request?.("screen"); } catch {}
-
-    // If server doesn't ack within 5s, return to welcome with error
-    const started = Date.now();
-    const timer = setInterval(() => {
-      if (state.myId) { clearInterval(timer); return; }
-      if (Date.now() - started > 5000) {
-        clearInterval(timer);
-        alert("Could not join the game.\nCheck the &server URL and that the server on port 3000 is reachable.");
-        state.screen = "welcome";
-        render();
-      }
-    }, 200);
+    // include photo in join for persistence + late host hydration
+    socket.emit("join", { pid, name: state.name, photo: state.photo });
   };
 }
 
-/* =========================================================================
-   CONTROLLER
-   ========================================================================= */
 function divText(f, color, weight){ const d=document.createElement("div"); d.style.cssText=`font:${weight} ${f}px system-ui;color:${color}`; return d; }
 function roundBtn(label, d, f){ const b=document.createElement("button"); b.textContent=label;
-  b.style.cssText=`position:absolute;width:${d}px;height:${d}px;border-radius:50%;border:0;background:#45a5ff;color:#051018;font:bold ${Math.round(f*0.85)}px system-ui;box-shadow:0 8px 20px rgba(0,0,0,0.35);touch-action:none;user-select:none;`; 
+  b.style.cssText=`position:absolute;width:${d}px;height:${d}px;border-radius:50%;border:0;background:#45a5ff;color:#051018;font:bold ${Math.round(f*0.85)}px system-ui;box-shadow:0 8px 20px rgba(0,0,0,0.35);touch-action:none;user-select:none;`;
   b.addEventListener("pointerdown", ()=>{ b.animate([{transform:'scale(1)'},{transform:'scale(0.94)'},{transform:'scale(1)'}],{duration:120}); try{navigator.vibrate?.(20);}catch{} }); return b; }
 
 function buildController(m) {
-  // prevent page scroll during control
   document.body.style.touchAction = "none";
 
   uiRoot.style.cssText = `
@@ -278,7 +222,7 @@ function buildController(m) {
     display:grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr;
     gap:1.2vh; padding:1.2vh; background:#737373;`;
 
-  // Header
+  // header
   const header = document.createElement("div");
   header.style.cssText = "grid-column:1 / span 2; display:flex; align-items:center; justify-content:center; gap:1.2vw;";
   photoRef = circleImg(Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.28));
@@ -290,14 +234,14 @@ function buildController(m) {
   numRef  = divText(Math.round(m.fBig*0.75), "#ff8cc6", 700);
   meta.append(nameRef, teamRef, numRef); header.append(photoRef, meta); uiRoot.appendChild(header);
 
-  // Left: joystick
+  // left: joystick
   const left = document.createElement("div");
   left.style.cssText = "display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1vh;";
   const joy = buildJoystick(m, (info)=>{ text1Ref.textContent = info; });
   text1Ref = divText(m.fMed, "#111", 600); text1Ref.textContent = "text1";
   left.append(joy, text1Ref); uiRoot.appendChild(left);
 
-  // Right: buttons
+  // right: buttons
   const right = document.createElement("div");
   right.style.cssText = "position:relative; display:flex; align-items:center; justify-content:center;";
   const field = document.createElement("div");
@@ -308,11 +252,9 @@ function buildController(m) {
   text2Ref = divText(m.fMed, "#111", 600); text2Ref.style.position="absolute"; text2Ref.style.left="0"; text2Ref.style.top="0"; text2Ref.textContent="text2";
   right.appendChild(text2Ref); uiRoot.appendChild(right);
 
-  // wire
   b1.addEventListener("pointerdown", ()=>{ text2Ref.textContent=`ping ${rtt} ms`; socket.volatile.emit("input", { action:1 }); });
   b2.addEventListener("pointerdown", ()=>{ text2Ref.textContent=`ping ${rtt} ms`; socket.volatile.emit("input", { action:2 }); });
 
-  // fill known labels
   if (state.mySeq != null) numRef.textContent = String(state.mySeq);
   if (state.myTeam) teamRef.textContent = `Team ${state.myTeam}`;
 }
@@ -372,9 +314,6 @@ async function toSquareDataURL(file, size=384){
   const g=c.getContext("2d"); g.drawImage(img,(img.width-s)/2,(img.height-s)/2,s,s,0,0,size,size);
   return c.toDataURL("image/jpeg",0.85);
 }
-const PH="data:image/svg+xml;base64,"+btoa(`<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'>
-  <rect width='200' height='200' fill='#eee'/><circle cx='100' cy='84' r='36' fill='#d7d7d7'/><rect x='52' y='124' rx='20' width='96' height='40' fill='#d7d7d7'/>
-</svg>`);
 
 /* ---------- boot ---------- */
 render();

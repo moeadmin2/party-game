@@ -10,17 +10,17 @@ const PORT = process.env.PORT || 3000;
 // Match your host frame: strokeRoundedRect(10, 10, 1260, 700, 34)
 const FRAME = { x: 10, y: 10, w: 1260, h: 700 };
 
-// Physics & broadcast rates (~60 Hz)
-const TICK_MS = 16;              // physics tick
-const SNAPSHOT_MS = 33;          // snapshots
+// Rates
+const TICK_MS = 16;   // physics ~60 Hz
+const SNAPSHOT_MS = 33; // broadcast ~30 Hz
 
 // Movement
-const SPEED_PPS = 220;                                // px/sec at full tilt
-const SPEED_PER_TICK = SPEED_PPS * (TICK_MS / 1000);  // per tick
+const SPEED_PPS = 220;
+const SPEED_PER_TICK = SPEED_PPS * (TICK_MS / 1000);
 
-// Player collision (big avatar circle)
-const PLAYER_RADIUS = 48;        // matches host's circle radius 48
-const BOUNCE = 0.12;             // tiny response on overlap resolution
+// Avatar collision (big circles only)
+const PLAYER_RADIUS = 48;
+const BOUNCE = 0.12;
 
 /* -------------------- Server -------------------- */
 const app = express();
@@ -32,15 +32,20 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
 /* -------------------- State -------------------- */
-const players = new Map(); // id -> { id,name,tint,team,n,photo,pos:{x,y},dir:{x,y},score }
+const players = new Map(); // id -> { id,name,tint,team,n,photo,pos:{x,y},dir:{x,y} }
 
 /* -------------------- Helpers -------------------- */
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const midX = () => FRAME.x + FRAME.w / 2;
 
 function spawnPos(id) {
   const xo = FRAME.x + 130 + (id.charCodeAt(0) % 10) * 110;
   const yo = FRAME.y + 150 + (id.charCodeAt(1) % 7) * 80;
   return { x: xo, y: yo };
+}
+
+function computeTeam(x) {
+  return x < midX() ? "X" : "O";
 }
 
 function lobbyPayload() {
@@ -50,15 +55,18 @@ function lobbyPayload() {
     tint: p.tint,
     team: p.team,
     n: p.n,
-    photo: p.photo || null
+    photo: p.photo || null,
   }));
 }
 
 function snapshotPayload() {
   return {
     players: [...players.values()].map(p => ({
-      id: p.id, x: p.pos.x | 0, y: p.pos.y | 0
-    }))
+      id: p.id,
+      x: p.pos.x | 0,
+      y: p.pos.y | 0,
+      team: p.team || null, // include live team for host UI
+    })),
   };
 }
 
@@ -67,40 +75,41 @@ io.on("connection", (socket) => {
   socket.on("join", (data) => {
     const name = String(data?.name || "anon").slice(0, 16);
     const tint = data?.tint || "#66ccff";
-    const team = (data?.team === "X" || data?.team === "O") ? data.team : undefined;
     const n = (typeof data?.n === "number") ? data.n : undefined;
     const photo = typeof data?.photo === "string" ? data.photo : undefined;
+
+    const pos = spawnPos(socket.id);
+    const team = computeTeam(pos.x);
 
     players.set(socket.id, {
       id: socket.id,
       name, tint, team, n, photo,
-      pos: spawnPos(socket.id),
+      pos,
       dir: { x: 0, y: 0 },
-      score: 0
     });
 
     socket.emit("joined", { id: socket.id });
     io.emit("lobby", lobbyPayload());
+
+    // If join contained a photo, also broadcast it so current host updates immediately
+    if (photo) {
+      io.emit("addtexture", { id: socket.id, data: photo });
+    }
   });
 
-  // Relay controller’s live texture updates (camera or upload)
+  // Controller uploads/updates avatar image
   socket.on("addtexture", (msg) => {
     const p = players.get(socket.id);
     if (!p) return;
     const data = typeof msg?.data === "string" ? msg.data : null;
     if (!data) return;
 
-    // Persist so host can also hydrate via future lobby payloads
-    p.photo = data;
-
-    // Broadcast to everyone (host will add/update 'ph-<id>' texture)
-    io.emit("addtexture", { id: socket.id, data });
-
-    // Also refresh lobby so late-join hosts get the photo too
-    io.emit("lobby", lobbyPayload());
+    p.photo = data;               // persist
+    io.emit("addtexture", { id: socket.id, data }); // live update
+    io.emit("lobby", lobbyPayload());               // hydrate late joiners
   });
 
-  // Movement / actions from controller
+  // Live input
   socket.on("input", (msg) => {
     const p = players.get(socket.id);
     if (!p) return;
@@ -120,7 +129,7 @@ io.on("connection", (socket) => {
   });
 });
 
-/* -------------------- Physics @ ~60 Hz -------------------- */
+/* -------------------- Physics -------------------- */
 setInterval(() => {
   for (const p of players.values()) {
     p.pos.x += p.dir.x * SPEED_PER_TICK;
@@ -133,6 +142,14 @@ setInterval(() => {
 
     p.pos.x = clamp(p.pos.x, minX, maxX);
     p.pos.y = clamp(p.pos.y, minY, maxY);
+
+    // Auto-assign team based on current x-position
+    const newTeam = computeTeam(p.pos.x);
+    if (newTeam !== p.team) {
+      p.team = newTeam;
+      // Optional: emit a small event if you want instant UI updates
+      io.emit("teamchange", { id: p.id, team: p.team });
+    }
   }
 
   // Avatar-Avatar collisions only
@@ -140,7 +157,6 @@ setInterval(() => {
   for (let i = 0; i < list.length; i++) {
     for (let j = i + 1; j < list.length; j++) {
       const a = list[i], b = list[j];
-
       let dx = b.pos.x - a.pos.x;
       let dy = b.pos.y - a.pos.y;
       let dist = Math.hypot(dx, dy);
@@ -176,7 +192,7 @@ setInterval(() => {
   }
 }, TICK_MS);
 
-/* -------------------- Snapshots @ ~30 Hz -------------------- */
+/* -------------------- Snapshots -------------------- */
 setInterval(() => {
   io.emit("snapshot", snapshotPayload());
 }, SNAPSHOT_MS);
