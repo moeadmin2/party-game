@@ -2,329 +2,318 @@ import { socketConnect } from "./main.js";
 
 const socket = socketConnect();
 
-/* ---------- GLOBAL STYLES / BACKGROUND ---------- */
+/* ---------- base styles ---------- */
 document.documentElement.style.background = "#737373";
 document.body.style.margin = "0";
 document.body.style.background = "#737373";
 document.body.style.color = "#000";
 document.body.style.font = "16px system-ui";
-document.body.style.touchAction = "none"; // prevent scroll/zoom on drag
+document.body.style.touchAction = "none";
 
-/* ---------- ORIENTATION HELPERS ---------- */
+/* ---------- keep refs ---------- */
+let myId = null;
+let mySeq = null;
+let myTeam = null;
+
+/* ---------- orientation helpers ---------- */
 const rotateOverlay = document.createElement("div");
 rotateOverlay.style.cssText = `
   position:fixed; inset:0; display:none; align-items:center; justify-content:center;
   background:rgba(0,0,0,0.35); z-index:9999; text-align:center; padding:20px;
-  backdrop-filter:saturate(80%) blur(2px);
+  backdrop-filter:saturate(80%) blur(2px); color:#fff;
 `;
 rotateOverlay.innerHTML = `
-  <div style="background:#222;border-radius:16px;padding:18px 22px;max-width:480px;color:#fff">
+  <div style="background:#222;border-radius:16px;padding:18px 22px;max-width:480px;">
     <div style="font:600 18px system-ui; margin-bottom:6px">Rotate to Landscape</div>
-    <div style="font:14px system-ui; color:#ddd; margin-bottom:12px">
-      For best control, use <b>landscape</b>. Some browsers need a user gesture.
-    </div>
-    <button id="forceLandscapeBtn"
-      style="padding:10px 14px;border:0;border-radius:10px;background:#3a6df0;color:#fff;font-weight:600">
+    <div style="font:14px system-ui; color:#ddd; margin-bottom:12px">For best control, use <b>landscape</b>.</div>
+    <button id="forceLandscapeBtn" style="padding:10px 14px;border:0;border-radius:10px;background:#3a6df0;color:#fff;font-weight:600">
       Try Force Landscape
     </button>
-  </div>
-`;
+  </div>`;
 document.body.appendChild(rotateOverlay);
-
-function showRotateOverlay(){ rotateOverlay.style.display = "flex"; }
-function hideRotateOverlay(){ rotateOverlay.style.display = "none"; }
 
 async function ensureLandscape() {
   try {
-    // Fullscreen greatly increases the chance that lock() works (Android).
     const el = document.documentElement;
     if (!document.fullscreenElement && el.requestFullscreen) {
       await el.requestFullscreen({ navigationUI: "hide" }).catch(() => {});
     }
     if (screen.orientation?.lock) {
       await screen.orientation.lock("landscape");
-      hideRotateOverlay();
+      rotateOverlay.style.display = "none";
       return true;
     }
-  } catch { /* ignore */ }
-  // If we reach here, lock wasn't allowed (e.g., iOS). Ask user to rotate.
-  if (!window.matchMedia("(orientation: landscape)").matches) showRotateOverlay();
+  } catch {}
+  if (!window.matchMedia("(orientation: landscape)").matches) rotateOverlay.style.display = "flex";
   return false;
 }
-
 document.getElementById("forceLandscapeBtn")?.addEventListener("click", ensureLandscape);
-window.addEventListener("orientationchange", () => {
-  if (window.matchMedia("(orientation: landscape)").matches) hideRotateOverlay();
-  else showRotateOverlay();
+
+/* =========================================================================
+   SCREEN 1: WELCOME (name ≤ 12, optional photo)
+   ========================================================================= */
+function welcomeScreen() {
+  document.body.innerHTML = "";
+  document.body.appendChild(rotateOverlay);
+
+  const box = document.createElement("div");
+  box.style.cssText = `
+    position:fixed; inset:24px; border:6px solid #111; border-radius:28px;
+    display:flex; flex-direction:column; align-items:center; justify-content:flex-start; padding:28px; gap:28px;
+    background:#737373;
+  `;
+  const title = document.createElement("div");
+  title.textContent = "Welcome";
+  title.style.cssText = "color:#ff8cc6; font:700 40px system-ui; margin-top:4px;";
+  box.appendChild(title);
+
+  // Form rows
+  const row1 = document.createElement("div");
+  row1.style.cssText = "display:flex; gap:20px; align-items:center; width:90%; justify-content:center;";
+  const nameLbl = pillLabel("Name (12 letters max):");
+  const nameInput = document.createElement("input");
+  nameInput.maxLength = 12;
+  nameInput.placeholder = "Your name";
+  nameInput.style.cssText = "width:520px; padding:16px 18px; border-radius:28px; border:0; background:#ffb3d9; color:#111; font:600 20px system-ui;";
+  row1.append(nameLbl, nameInput);
+  box.appendChild(row1);
+
+  const row2 = document.createElement("div");
+  row2.style.cssText = "display:flex; gap:24px; align-items:center; width:90%; justify-content:center;";
+  const picLbl = pillLabel("Picture (optional):");
+  const uploadBtn = pillButton("Upload");
+  const file = document.createElement("input");
+  file.type = "file";
+  file.accept = "image/*";
+  file.capture = "user";
+  file.style.display = "none";
+
+  const preview = circleImg(180); // circular preview
+  row2.append(picLbl, uploadBtn, preview);
+  box.appendChild(row2);
+
+  const joinBtn = pillButton("Join");
+  joinBtn.style.background = "#3a6df0";
+  joinBtn.style.marginTop = "8px";
+  joinBtn.disabled = true;
+  box.appendChild(joinBtn);
+
+  document.body.appendChild(box);
+
+  let photoDataURL = null;
+
+  uploadBtn.onclick = () => file.click();
+  file.onchange = async () => {
+    const f = file.files?.[0];
+    if (!f) return;
+    photoDataURL = await toSquareDataURL(f, 256);
+    preview.src = photoDataURL;
+  };
+
+  nameInput.addEventListener("input", () => {
+    joinBtn.disabled = nameInput.value.trim().length === 0;
+  });
+
+  joinBtn.onclick = async () => {
+    const name = nameInput.value.trim().slice(0, 12);
+    socket.emit("join", { name, photo: photoDataURL });
+    await ensureLandscape();
+    try { await navigator.wakeLock?.request?.("screen"); } catch {}
+    // wait for "joined" to flip to game screen
+  };
+}
+
+socket.on("joined", (info) => {
+  myId = info.id;
+  mySeq = info.n;
+  gameScreen(); // switch to controller UI
 });
-document.addEventListener("fullscreenchange", () => {
-  // If they exit fullscreen, we may lose lock; keep the hint accurate.
-  if (!document.fullscreenElement &&
-      !window.matchMedia("(orientation: landscape)").matches) showRotateOverlay();
+
+/* =========================================================================
+   SCREEN 2: CONTROLLER (joystick + two buttons + profile)
+   ========================================================================= */
+let text1Ref, text2Ref, teamRef, nameRef, numRef, photoRef;
+
+function gameScreen() {
+  document.body.innerHTML = "";
+  document.body.appendChild(rotateOverlay);
+
+  const root = document.createElement("div");
+  root.style.cssText = `
+    position:fixed; inset:24px; border:6px solid #111; border-radius:28px;
+    display:grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr;
+    gap:10px; padding:18px; background:#737373;
+  `;
+
+  // Profile header (center column span)
+  const header = document.createElement("div");
+  header.style.cssText = "grid-column: 1 / span 2; display:flex; align-items:center; justify-content:center; gap:18px;";
+  photoRef = circleImg(180);
+  const meta = document.createElement("div");
+  meta.style.cssText = "display:flex; flex-direction:column; align-items:center; gap:8px;";
+  nameRef = document.createElement("div");
+  nameRef.style.cssText = "font:700 34px system-ui; color:#ff8cc6";
+  teamRef = document.createElement("div");
+  teamRef.style.cssText = "font:700 28px system-ui; color:#ff8cc6";
+  numRef = document.createElement("div");
+  numRef.style.cssText = "font:700 24px system-ui; color:#ff8cc6";
+  meta.append(nameRef, teamRef, numRef);
+  header.append(photoRef, meta);
+  root.appendChild(header);
+
+  // Left: joystick + text1
+  const left = document.createElement("div");
+  left.style.cssText = "display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px;";
+  const joy = buildJoystick((info) => { text1Ref.textContent = info; }); // updates text1
+  text1Ref = document.createElement("div");
+  text1Ref.style.cssText = "font:600 18px system-ui; color:#111";
+  text1Ref.textContent = "text1";
+  left.append(joy, text1Ref);
+  root.appendChild(left);
+
+  // Right: buttons + text2
+  const right = document.createElement("div");
+  right.style.cssText = "position:relative; display:flex; align-items:center; justify-content:center;";
+  const field = document.createElement("div");
+  field.style.cssText = "position:relative; width:320px; height:320px;";
+  const b2 = roundBtn("2"); b2.style.left = "60px";  b2.style.top = "150px";
+  const b1 = roundBtn("1"); b1.style.left = "180px"; b1.style.top = "40px"; // NE of 2
+  field.append(b2, b1);
+  right.appendChild(field);
+
+  text2Ref = document.createElement("div");
+  text2Ref.style.cssText = "position:absolute; left:0; top:0; font:600 18px system-ui; color:#111";
+  text2Ref.textContent = "text2";
+  right.appendChild(text2Ref);
+
+  root.appendChild(right);
+  document.body.appendChild(root);
+
+  // wire actions
+  b1.addEventListener("pointerdown", () => { text2Ref.textContent = "text2: 1"; socket.emit("input", { action: 1 }); });
+  b2.addEventListener("pointerdown", () => { text2Ref.textContent = "text2: 2"; socket.emit("input", { action: 2 }); });
+}
+
+/* ---------- live updates from server (team/name/photo) ---------- */
+socket.on("snapshot", (snap) => {
+  if (!myId) return;
+  const me = (snap.players || []).find(p => p.id === myId);
+  if (!me) return;
+  myTeam = me.team || null;
+
+  if (nameRef) nameRef.textContent = me.name || "";
+  if (numRef) numRef.textContent = String(me.n ?? "");
+  if (teamRef) teamRef.textContent = myTeam ? `Team ${myTeam}` : "";
+  if (me.photo && photoRef && photoRef.getAttribute("data-src") !== me.photo) {
+    photoRef.src = me.photo;
+    photoRef.setAttribute("data-src", me.photo);
+  }
 });
 
-/* ---------- LAYOUT ---------- */
-const root = document.createElement("div");
-root.style.position = "fixed";
-root.style.inset = "0";
-root.style.display = "grid";
-root.style.gridTemplateRows = "auto 1fr";
-root.style.padding = "10px";
-document.body.appendChild(root);
-
-// Top bar (name, join, status)
-const bar = document.createElement("div");
-bar.style.display = "flex";
-bar.style.gap = "8px";
-bar.style.alignItems = "center";
-bar.style.flexWrap = "wrap";
-root.appendChild(bar);
-
-bar.innerHTML = `
-  <input id="name" placeholder="Name"
-         style="padding:10px 12px;border-radius:10px;border:1px solid #333;background:#2e2e2e;color:#fff" />
-  <input id="color" type="color" value="#66ccff"
-         style="padding:0;width:46px;height:42px;border-radius:10px;border:1px solid #333;background:#2e2e2e"/>
-  <button id="join"
-          style="padding:10px 14px;border:0;border-radius:10px;background:#3a6df0;color:#fff">Join</button>
-  <span id="status" style="color:#111;margin-left:6px"></span>
-  <div style="margin-left:auto;display:flex;gap:18px;">
-    <div id="text1" style="font:600 14px system-ui;color:#111">text1</div>
-    <div id="text2" style="font:600 14px system-ui;color:#111">text2</div>
-  </div>
-`;
-
-// Main play area: 2 columns (left joystick, right buttons)
-const pad = document.createElement("div");
-pad.style.position = "relative";
-pad.style.display = "grid";
-pad.style.gridTemplateColumns = "1fr 1fr";
-pad.style.gap = "10px";
-pad.style.height = "100%";
-root.appendChild(pad);
-
-/* ---------- LEFT: JOYSTICK ---------- */
-const joyBox = document.createElement("div");
-joyBox.style.position = "relative";
-joyBox.style.display = "flex";
-joyBox.style.alignItems = "center";
-joyBox.style.justifyContent = "center";
-pad.appendChild(joyBox);
-
-// Sizes
-const JOY_SIZE = 220;
-const RING_R = 95;      // cyan ring radius
-const KNOB_R = 28;      // pink knob radius
-const STICK_W = 6;
-
-joyBox.style.height = "100%";
-joyBox.style.minHeight = `${JOY_SIZE}px`;
-
-// Ring
-const ring = document.createElement("div");
-ring.style.position = "relative";
-ring.style.width = `${RING_R*2}px`;
-ring.style.height = `${RING_R*2}px`;
-ring.style.borderRadius = "50%";
-ring.style.boxSizing = "border-box";
-ring.style.border = "10px solid #56e1e6";
-ring.style.background = "transparent";
-joyBox.appendChild(ring);
-
-// Center red dot
-const centerDot = document.createElement("div");
-centerDot.style.cssText = `
-  position:absolute; left:50%; top:50%; width:10px; height:10px;
-  background:#ff2d2d; border-radius:50%; transform:translate(-50%,-50%);
-`;
-ring.appendChild(centerDot);
-
-// Stick (black)
-const stick = document.createElement("div");
-stick.style.position = "absolute";
-stick.style.left = "50%";
-stick.style.top = "50%";
-stick.style.width = `${STICK_W}px`;
-stick.style.height = "0px";
-stick.style.transformOrigin = "50% 100%";
-stick.style.background = "black";
-stick.style.borderRadius = "3px";
-stick.style.transform = "translate(-50%,-100%) rotate(0rad)";
-ring.appendChild(stick);
-
-// Knob (pink)
-const knob = document.createElement("div");
-knob.style.position = "absolute";
-knob.style.width = `${KNOB_R*2}px`;
-knob.style.height = `${KNOB_R*2}px`;
-knob.style.borderRadius = "50%";
-knob.style.background = "#ffb3d9";
-knob.style.left = "50%";
-knob.style.top = "50%";
-knob.style.transform = "translate(-50%,-50%)";
-ring.appendChild(knob);
-
-/* ---------- RIGHT: BUTTONS (1 NE of 2) ---------- */
-const btnArea = document.createElement("div");
-btnArea.style.position = "relative";
-btnArea.style.display = "flex";
-btnArea.style.alignItems = "center";
-btnArea.style.justifyContent = "center";
-pad.appendChild(btnArea);
-
-// Container so we can absolutely place 1 relative to 2 (NE)
-const btnField = document.createElement("div");
-btnField.style.position = "relative";
-btnField.style.width = "280px";
-btnField.style.height = "280px";
-btnArea.appendChild(btnField);
-
-function roundButton(label){
+/* ---------- UI builders ---------- */
+function pillLabel(text) {
+  const d = document.createElement("div");
+  d.textContent = text;
+  d.style.cssText = "color:#111; font:600 40px system-ui;";
+  return d;
+}
+function pillButton(text) {
   const b = document.createElement("button");
-  b.textContent = label;
-  b.style.position = "absolute";
-  b.style.width = "140px";
-  b.style.height = "140px";
-  b.style.borderRadius = "50%";
-  b.style.border = "0";
-  b.style.background = "#45a5ff";
-  b.style.color = "#051018";
-  b.style.font = "bold 32px system-ui";
-  b.style.boxShadow = "0 8px 20px rgba(0,0,0,0.35)";
+  b.textContent = text;
+  b.style.cssText = "padding:14px 22px; border:0; border-radius:28px; background:#ffb3d9; color:#111; font:700 20px system-ui;";
   b.style.touchAction = "none";
-  b.style.userSelect = "none";
-  b.addEventListener("pointerdown", ()=> pulse(b));
   return b;
 }
-const btn2 = roundButton("2"); // place button 2 first
-btn2.style.left = "40px";
-btn2.style.top  = "130px";
-const btn1 = roundButton("1"); // button 1 to the NE of 2
-btn1.style.left = "140px";     // right of 2
-btn1.style.top  = "20px";      // above 2
-btnField.appendChild(btn2);
-btnField.appendChild(btn1);
-
-function pulse(el){
-  el.animate([{ transform: 'scale(1)' }, { transform: 'scale(0.94)' }, { transform: 'scale(1)' }], { duration: 120 });
-  try { navigator.vibrate?.(20); } catch {}
+function circleImg(sz) {
+  const img = document.createElement("img");
+  img.width = img.height = sz;
+  img.style.cssText = `width:${sz}px;height:${sz}px;border-radius:50%;object-fit:cover;border:3px solid #111;background:#eee`;
+  img.src = PH;
+  return img;
+}
+function roundBtn(label){
+  const b = document.createElement("button");
+  b.textContent = label;
+  b.style.cssText = `
+    position:absolute;width:150px;height:150px;border-radius:50%;border:0;background:#45a5ff;
+    color:#051018;font:bold 34px system-ui;box-shadow:0 8px 20px rgba(0,0,0,0.35);touch-action:none;user-select:none;
+  `;
+  b.addEventListener("pointerdown", ()=>{ b.animate([{transform:'scale(1)'},{transform:'scale(0.94)'},{transform:'scale(1)'}],{duration:120}); try{navigator.vibrate?.(20);}catch{} });
+  return b;
 }
 
-/* ---------- TOP BAR HOOKS ---------- */
-const nameI  = document.getElementById("name");
-const colorI = document.getElementById("color");
-const joinB  = document.getElementById("join");
-const status = document.getElementById("status");
-const text1  = document.getElementById("text1");
-const text2  = document.getElementById("text2");
+function buildJoystick(onText) {
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "display:flex; align-items:center; justify-content:center;";
 
-socket.on("connect", () => (status.textContent = "Connected"));
-socket.on("joined",  (msg) => (status.textContent = `Joined as ${msg.id}`));
+  const RING_R = 95, KNOB_R = 28;
+  const ring = document.createElement("div");
+  ring.style.cssText = `position:relative;width:${RING_R*2}px;height:${RING_R*2}px;border-radius:50%;
+                        box-sizing:border-box;border:10px solid #56e1e6;background:transparent;`;
+  const centerDot = document.createElement("div");
+  centerDot.style.cssText = "position:absolute;left:50%;top:50%;width:10px;height:10px;background:#ff2d2d;border-radius:50%;transform:translate(-50%,-50%);";
+  const stick = document.createElement("div");
+  stick.style.cssText = "position:absolute;left:50%;top:50%;width:6px;height:0px;background:black;border-radius:3px;transform-origin:50% 100%;transform:translate(-50%,-100%) rotate(0rad);";
+  const knob = document.createElement("div");
+  knob.style.cssText = `position:absolute;width:${KNOB_R*2}px;height:${KNOB_R*2}px;border-radius:50%;background:#ff8cc6;left:50%;top:50%;transform:translate(-50%,-50%);`;
+  ring.append(centerDot, stick, knob);
+  wrap.appendChild(ring);
 
-joinB.onclick = async () => {
-  const name = (nameI.value || "anon").slice(0,16);
-  socket.emit("join", { name, tint: colorI.value });
+  const MAX_R = RING_R;
+  let dir = { x: 0, y: 0 }, dragging = false, lastSend = 0;
 
-  // Try to force landscape after a user gesture
-  await ensureLandscape();
+  const rect = () => ring.getBoundingClientRect();
+  const center = () => { const r = rect(); return { cx: r.left + r.width/2, cy: r.top + r.height/2 }; };
+  const setKnob = (px,py)=>{ knob.style.left = `${px}px`; knob.style.top = `${py}px`; };
+  const resetKnob = ()=>{ knob.style.left = "50%"; knob.style.top = "50%"; stick.style.height = "0px"; stick.style.transform = "translate(-50%,-100%) rotate(0rad)"; onText?.("text1"); };
 
-  // Keep screen on
-  try { await navigator.wakeLock?.request?.("screen"); } catch {}
-};
+  function onPointer(e) {
+    const { cx, cy } = center();
+    const x = e.clientX - cx, y = e.clientY - cy;
+    const dist = Math.hypot(x, y), ang = Math.atan2(y, x);
+    const cl = Math.min(dist, MAX_R), nx = Math.cos(ang)*cl, ny = Math.sin(ang)*cl;
 
-/* ---------- JOYSTICK LOGIC ---------- */
-let dir = { x: 0, y: 0 };     // normalized -1..1
-let dragging = false;
-let lastSend = 0;
+    const r = rect(); setKnob(nx + r.width/2, ny + r.height/2);
+    stick.style.height = `${cl}px`; stick.style.transform = `translate(-50%,-100%) rotate(${ang + Math.PI/2}rad)`;
 
-const ringRect = () => ring.getBoundingClientRect();
-const center = () => {
-  const r = ringRect();
-  return { cx: r.left + r.width/2, cy: r.top + r.height/2 };
-};
-const MAX_R = RING_R;
+    dir.x = nx / MAX_R; dir.y = ny / MAX_R;
+    let deg = ang * 180 / Math.PI; if (deg < 0) deg += 360;
+    const mag = cl / MAX_R;
+    onText?.(`text1: ${deg.toFixed(0)}° | mag ${mag.toFixed(2)} | dx ${dir.x.toFixed(2)} dy ${dir.y.toFixed(2)}`);
+  }
 
-function setKnob(px, py) {
-  knob.style.left = `${px}px`;
-  knob.style.top  = `${py}px`;
-}
-function resetKnob() {
-  knob.style.left = "50%";
-  knob.style.top  = "50%";
-  stick.style.height = "0px";
-  stick.style.transform = "translate(-50%,-100%) rotate(0rad)";
-  text1.textContent = "text1"; // clear when released
-}
+  function pd(e){ dragging = true; ring.setPointerCapture?.(e.pointerId); onPointer(e); }
+  function pm(e){ if (dragging) onPointer(e); }
+  function pu(){ dragging = false; dir = {x:0,y:0}; resetKnob(); }
 
-function onPointer(e) {
-  const { cx, cy } = center();
-  const x = e.clientX - cx;
-  const y = e.clientY - cy;
-  const dist = Math.hypot(x, y);
-  const angle = Math.atan2(y, x);        // radians
-  const clamped = Math.min(dist, MAX_R);
-  const nx = Math.cos(angle) * clamped;
-  const ny = Math.sin(angle) * clamped;
+  ring.addEventListener("pointerdown", pd);
+  ring.addEventListener("pointermove", pm);
+  ring.addEventListener("pointerup", pu);
+  ring.addEventListener("pointercancel", pu);
+  ring.addEventListener("lostpointercapture", pu);
 
-  // Visual position
-  const r = ringRect();
-  const px = (nx + r.width/2);
-  const py = (ny + r.height/2);
-  setKnob(px, py);
+  setInterval(()=> {
+    const now = performance.now();
+    if (now - lastSend < 32) return;
+    lastSend = now;
+    socket.emit("input", { dx: Number(dir.x.toFixed(3)), dy: Number(dir.y.toFixed(3)) });
+  }, 40);
 
-  // Stick
-  stick.style.height = `${clamped}px`;
-  stick.style.transform = `translate(-50%,-100%) rotate(${angle + Math.PI/2}rad)`;
-
-  // Normalized direction -1..1
-  dir.x = nx / MAX_R;
-  dir.y = ny / MAX_R;
-
-  // UI text: degrees (0° = right, 90° = down; adjust if you prefer up=0°)
-  let deg = angle * 180 / Math.PI;
-  if (deg < 0) deg += 360;
-  const mag = (clamped / MAX_R);
-  text1.textContent = `text1: ${deg.toFixed(0)}°  |  mag ${mag.toFixed(2)}  |  dx ${dir.x.toFixed(2)} dy ${dir.y.toFixed(2)}`;
+  return wrap;
 }
 
-function joyPointerDown(e){
-  dragging = true;
-  ring.setPointerCapture?.(e.pointerId);
-  onPointer(e);
+/* ---------- utils ---------- */
+async function toSquareDataURL(file, size = 256) {
+  const img = new Image(); img.src = URL.createObjectURL(file); await img.decode();
+  const s = Math.min(img.width, img.height); const c = document.createElement("canvas"); c.width = c.height = size;
+  const g = c.getContext("2d");
+  g.drawImage(img, (img.width - s)/2, (img.height - s)/2, s, s, 0, 0, size, size);
+  return c.toDataURL("image/jpeg", 0.8);
 }
-function joyPointerMove(e){
-  if(!dragging) return;
-  onPointer(e);
-}
-function joyPointerUp(){
-  dragging = false;
-  dir = { x: 0, y: 0 };
-  resetKnob();
-}
+const PH = "data:image/svg+xml;base64," + btoa(`<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'>
+  <rect width='200' height='200' fill='#eee'/><circle cx='100' cy='84' r='36' fill='#d7d7d7'/><rect x='52' y='124' rx='20' width='96' height='40' fill='#d7d7d7'/>
+</svg>`);
 
-ring.addEventListener("pointerdown", joyPointerDown);
-ring.addEventListener("pointermove", joyPointerMove);
-ring.addEventListener("pointerup", joyPointerUp);
-ring.addEventListener("pointercancel", joyPointerUp);
-ring.addEventListener("lostpointercapture", joyPointerUp);
-
-/* ---------- SEND INPUTS (25 Hz) ---------- */
-setInterval(()=>{
-  const now = performance.now();
-  if (now - lastSend < 32) return;
-  lastSend = now;
-  socket.emit("input", {
-    dx: Number(dir.x.toFixed(3)),
-    dy: Number(dir.y.toFixed(3))
-  });
-}, 40);
-
-/* ---------- BUTTON EVENTS + text2 ---------- */
-btn1.addEventListener("pointerdown", () => {
-  text2.textContent = "text2: 1";
-  socket.emit("input", { dx: 0, dy: 0, action: 1 });
-});
-btn2.addEventListener("pointerdown", () => {
-  text2.textContent = "text2: 2";
-  socket.emit("input", { dx: 0, dy: 0, action: 2 });
-});
+/* ---------- boot ---------- */
+socket.on("connect", () => { /* noop; UI builds immediately */ });
+welcomeScreen();
