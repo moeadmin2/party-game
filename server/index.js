@@ -1,202 +1,184 @@
 // server/index.js
-const path = require("path");
-const fs = require("fs");
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
 
-/* ---------------- Config ---------------- */
+/* -------------------- Config -------------------- */
 const PORT = process.env.PORT || 3000;
-const ARENA = { w: 1280, h: 720, margin: 20 };
-const TICK_MS = 16;          // 60 Hz physics
-const SNAPSHOT_MS = 33;      // ~30 Hz broadcast
-const SPEED_PPS = 260;       // pixels per second
-const SPEED_PER_TICK = SPEED_PPS * (TICK_MS / 1000);
-const GRACE_MS = 60_000;     // keep avatar alive for 60s after disconnect
-const halfX = () => ARENA.w / 2;
 
-/* ---------------- App/IO ---------------- */
+// Match your host frame: strokeRoundedRect(10, 10, 1260, 700, 34)
+const FRAME = { x: 10, y: 10, w: 1260, h: 700 };
+
+// Physics & broadcast rates (~60 Hz)
+const TICK_MS = 16;              // physics tick
+const SNAPSHOT_MS = 16;          // snapshots (what you called "nap")
+
+// Movement
+const SPEED_PPS = 220;                                // px/sec at full tilt
+const SPEED_PER_TICK = SPEED_PPS * (TICK_MS / 1000);  // per tick
+
+// Player collision (big avatar circle)
+const PLAYER_RADIUS = 48;        // matches host's strokeCircle radius 48
+const BOUNCE = 0.12;             // tiny response on overlap resolution
+
+/* -------------------- Server -------------------- */
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "5mb" }));
-app.use(express.urlencoded({ extended: false }));
-
+app.use(express.static("public"));     // put built client here if you want one URL
 app.get("/health", (_, res) => res.send("OK"));
 
-// Optional static serving if client/dist exists (no wildcard patterns)
-const distDir = path.join(__dirname, "..", "client", "dist");
-if (fs.existsSync(distDir)) {
-  app.use(express.static(distDir));
-  app.use((req, res, next) => {
-    if (req.path.startsWith("/socket.io")) return next();
-    if (req.method !== "GET") return next();
-    const indexFile = path.join(distDir, "index.html");
-    if (fs.existsSync(indexFile)) return res.sendFile(indexFile);
-    next();
-  });
-}
-
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*" },
-  transports: ["websocket"],
-  perMessageDeflate: false,
-  pingInterval: 4000,   // more forgiving for background/sleep
-  pingTimeout: 20000,   // 20s timeout
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
-/* ---------------- State ---------------- */
-// Player records are keyed by persistent pid; socketId can change.
-const playersByPid = new Map();   // pid -> player
-const pidBySocket = new Map();    // socketId -> pid
-let joinSeq = 0;
+/* -------------------- State -------------------- */
+const players = new Map(); // id -> { id,name,tint,team,n,photo,pos:{x,y},dir:{x,y},score }
 
+/* -------------------- Helpers -------------------- */
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-function spawnPos(pid) {
-  const a = pid.charCodeAt(0) || 65;
-  const b = pid.charCodeAt(1) || 66;
-  const xo = 300 + (a % 7) * 90;
-  const yo = 180 + (b % 5) * 110;
+
+function spawnPos(id) {
+  // deterministic spread based on socket id (keeps spacing)
+  const xo = FRAME.x + 130 + (id.charCodeAt(0) % 10) * 110;
+  const yo = FRAME.y + 150 + (id.charCodeAt(1) % 7) * 80;
   return { x: xo, y: yo };
 }
 
 function lobbyPayload() {
-  return [...playersByPid.values()].map(p => ({
-    id: p.socketId, n: p.seq, name: p.name, photo: p.photo || null
+  // lightweight lobby info (no positions here)
+  return [...players.values()].map(p => ({
+    id: p.id,
+    name: p.name,
+    tint: p.tint,
+    team: p.team,
+    n: p.n,
+    photo: p.photo || null
   }));
 }
+
 function snapshotPayload() {
+  // positions only (keep payload tiny @60 Hz)
   return {
-    players: [...playersByPid.values()].map(p => ({
-      id: p.socketId,
-      n: p.seq,
-      name: p.name,
-      x: p.pos.x,
-      y: p.pos.y,
-      team: p.team || null,
-      photo: p.photo || null,
+    players: [...players.values()].map(p => ({
+      id: p.id, x: p.pos.x | 0, y: p.pos.y | 0
     }))
   };
 }
 
-/* ---------------- Socket helpers ---------------- */
-function bindSocketToPlayer(pid, socket) {
-  // Detach previous socket mapping if any
-  for (const [sid, mappedPid] of pidBySocket.entries()) {
-    if (mappedPid === pid && sid !== socket.id) pidBySocket.delete(sid);
-  }
-  pidBySocket.set(socket.id, pid);
-
-  const p = playersByPid.get(pid);
-  p.socketId = socket.id;
-  if (p._graceTimer) {
-    clearTimeout(p._graceTimer);
-    p._graceTimer = null;
-  }
-}
-
-function ensurePlayer(pid, init) {
-  let p = playersByPid.get(pid);
-  if (!p) {
-    p = {
-      pid,
-      socketId: null,
-      seq: ++joinSeq,
-      name: (init?.name || "anon").slice(0, 12),
-      photo: init?.photo || null,
-      pos: spawnPos(pid),
-      dir: { x: 0, y: 0 },
-      team: null,
-      _graceTimer: null,
-    };
-    playersByPid.set(pid, p);
-  } else {
-    // Update profile if newly provided
-    if (init?.name) p.name = String(init.name).slice(0, 12);
-    if (init?.photo) p.photo = init.photo;
-  }
-  return p;
-}
-
-/* ---------------- Sockets ---------------- */
+/* -------------------- Sockets -------------------- */
 io.on("connection", (socket) => {
-  // RTT echo
-  socket.on("rt", (t0) => socket.emit("rt", t0, Date.now()));
+  socket.on("join", (data) => {
+    // Merge known fields but NEVER create extra avatars
+    const name = String(data?.name || "anon").slice(0, 16);
+    const tint = data?.tint || "#66ccff";
+    const team = (data?.team === "X" || data?.team === "O") ? data.team : undefined;
+    const n = (typeof data?.n === "number") ? data.n : undefined;
+    const photo = typeof data?.photo === "string" ? data.photo : undefined;
 
-  // Client sends 'join' with persistent pid + profile when they hit Join.
-  socket.on("join", (msg = {}) => {
-    const pid = String(msg.pid || "").slice(0, 64); // from client localStorage
-    if (!pid) return; // reject if missing pid
+    players.set(socket.id, {
+      id: socket.id,
+      name, tint, team, n, photo,
+      pos: spawnPos(socket.id),
+      dir: { x: 0, y: 0 },
+      score: 0
+    });
 
-    const p = ensurePlayer(pid, { name: msg.name, photo: msg.photo });
-    bindSocketToPlayer(pid, socket);
-
-    socket.emit("joined", { id: p.socketId, n: p.seq });
+    socket.emit("joined", { id: socket.id });
     io.emit("lobby", lobbyPayload());
   });
 
-  // Resume hook: on reconnect (app background/foreground), client can ping resume.
-  socket.on("resume", (pid) => {
-    if (!pid) return;
-    const p = playersByPid.get(pid);
-    if (!p) return; // unknown pid; client should send a fresh 'join'
-    bindSocketToPlayer(pid, socket);
-    socket.emit("joined", { id: p.socketId, n: p.seq });
-    io.emit("lobby", lobbyPayload());
-  });
-
+  // Continuous inputs (controller)
   socket.on("input", (msg) => {
-    const pid = pidBySocket.get(socket.id);
-    if (!pid) return;
-    const p = playersByPid.get(pid);
+    const p = players.get(socket.id);
     if (!p) return;
 
-    if (typeof msg.dx === "number" || typeof msg.dy === "number") {
-      const dx = clamp(Number(msg?.dx || 0), -1, 1);
-      const dy = clamp(Number(msg?.dy || 0), -1, 1);
-      p.dir.x = isFinite(dx) ? dx : 0;
-      p.dir.y = isFinite(dy) ? dy : 0;
-    }
-    if (msg?.action === 1) io.volatile.emit("action", { by: p.socketId, action: 1 });
-    if (msg?.action === 2) io.volatile.emit("action", { by: p.socketId, action: 2 });
+    // 360° analog
+    const dx = clamp(Number(msg?.dx || 0), -1, 1);
+    const dy = clamp(Number(msg?.dy || 0), -1, 1);
+    p.dir.x = Number.isFinite(dx) ? dx : 0;
+    p.dir.y = Number.isFinite(dy) ? dy : 0;
+
+    // Actions 1/2 (broadcast only; your host UI can react)
+    if (msg?.action === 1) io.emit("action", { by: p.id, action: 1 });
+    if (msg?.action === 2) io.emit("action", { by: p.id, action: 2 });
   });
 
   socket.on("disconnect", () => {
-    const pid = pidBySocket.get(socket.id);
-    pidBySocket.delete(socket.id);
-    if (!pid) return;
-
-    const p = playersByPid.get(pid);
-    if (!p) return;
-
-    // Start grace timer; keep the avatar in-game for GRACE_MS.
-    if (p._graceTimer) clearTimeout(p._graceTimer);
-    p._graceTimer = setTimeout(() => {
-      playersByPid.delete(pid);
-      io.emit("lobby", lobbyPayload());
-    }, GRACE_MS);
+    players.delete(socket.id);
+    io.emit("lobby", lobbyPayload());
   });
 });
 
-/* ---------------- Ticks ---------------- */
+/* -------------------- Physics @ ~60 Hz -------------------- */
 setInterval(() => {
-  for (const p of playersByPid.values()) {
+  // 1) Integrate motion
+  for (const p of players.values()) {
     p.pos.x += p.dir.x * SPEED_PER_TICK;
     p.pos.y += p.dir.y * SPEED_PER_TICK;
-    const m = ARENA.margin;
-    p.pos.x = clamp(p.pos.x, m, ARENA.w - m);
-    p.pos.y = clamp(p.pos.y, m, ARENA.h - m);
-    const newTeam = p.pos.x < halfX() ? "X" : "O";
-    if (newTeam !== p.team) p.team = newTeam;
+
+    // Clamp to frame (keep full circle in-bounds)
+    const minX = FRAME.x + PLAYER_RADIUS;
+    const maxX = FRAME.x + FRAME.w - PLAYER_RADIUS;
+    const minY = FRAME.y + PLAYER_RADIUS;
+    const maxY = FRAME.y + FRAME.h - PLAYER_RADIUS;
+
+    p.pos.x = clamp(p.pos.x, minX, maxX);
+    p.pos.y = clamp(p.pos.y, minY, maxY);
+  }
+
+  // 2) Resolve collisions between avatars only (big circles)
+  const list = [...players.values()];
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      const a = list[i], b = list[j];
+
+      let dx = b.pos.x - a.pos.x;
+      let dy = b.pos.y - a.pos.y;
+      let dist = Math.hypot(dx, dy);
+
+      const minDist = PLAYER_RADIUS + PLAYER_RADIUS;
+      if (dist < 1e-6) {
+        // Coincident: nudge on X to avoid NaN
+        dx = 1; dy = 0; dist = 1;
+      }
+
+      if (dist < minDist) {
+        const overlap = minDist - dist;
+        const nx = dx / dist;
+        const ny = dy / dist;
+
+        // split push evenly
+        const push = overlap / 2;
+        a.pos.x -= nx * push; a.pos.y -= ny * push;
+        b.pos.x += nx * push; b.pos.y += ny * push;
+
+        // small bounce based on each input direction (keeps them from sticking)
+        a.pos.x -= a.dir.x * BOUNCE * overlap;
+        a.pos.y -= a.dir.y * BOUNCE * overlap;
+        b.pos.x -= b.dir.x * BOUNCE * overlap;
+        b.pos.y -= b.dir.y * BOUNCE * overlap;
+
+        // re-clamp after resolution
+        const minX = FRAME.x + PLAYER_RADIUS;
+        const maxX = FRAME.x + FRAME.w - PLAYER_RADIUS;
+        const minY = FRAME.y + PLAYER_RADIUS;
+        const maxY = FRAME.y + FRAME.h - PLAYER_RADIUS;
+
+        a.pos.x = clamp(a.pos.x, minX, maxX);
+        a.pos.y = clamp(a.pos.y, minY, maxY);
+        b.pos.x = clamp(b.pos.x, minX, maxX);
+        b.pos.y = clamp(b.pos.y, minY, maxY);
+      }
+    }
   }
 }, TICK_MS);
 
+/* -------------------- Snapshots @ ~60 Hz -------------------- */
 setInterval(() => {
-  io.volatile.emit("snapshot", snapshotPayload());
+  io.emit("snapshot", snapshotPayload());
 }, SNAPSHOT_MS);
 
-/* ---------------- Start ---------------- */
+/* -------------------- Start -------------------- */
 server.listen(PORT, () => {
   console.log(`Server on http://localhost:${PORT}`);
 });
