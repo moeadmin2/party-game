@@ -24,7 +24,7 @@ const state = {
   myTeam: null,
 };
 
-/* ---------- shared UI refs (declare once!) ---------- */
+/* ---------- shared UI refs ---------- */
 let uiRoot;
 let text1Ref, text2Ref, teamRef, nameRef, numRef, photoRef, b1, b2;
 
@@ -107,17 +107,20 @@ socket.on("connect", () => {
   // If we already joined before, ask server to resume this pid.
   if (state.mySeq != null || state.name) {
     socket.emit("resume", pid);
+    // Make sure latest photo is known by server/host after resume.
+    if (state.photo) socket.emit("photo", { pid, photo: state.photo });
   }
 });
 
 socket.on("disconnect", () => {
-  // Stay on controller; we'll resume on reconnect.
   console.warn("socket disconnected; waiting to resume…");
 });
 
 socket.on("joined", (info)=>{
   state.myId = info.id;
   state.mySeq = info.n;
+  // Re-send photo once we have an id/seq so host definitely gets it
+  if (state.photo) socket.emit("photo", { pid, photo: state.photo });
   if (state.screen !== "controller") { state.screen = "controller"; }
   render();
 });
@@ -160,7 +163,6 @@ function circleImg(sz){ const img=document.createElement("img"); img.width=img.h
   img.style.cssText=`width:${sz}px;height:${sz}px;border-radius:50%;object-fit:cover;border:3px solid #111;background:#eee`; img.src=PH; return img; }
 
 function buildWelcome(m) {
-  // allow normal scrolling/keyboard behavior
   document.body.style.touchAction = "auto";
 
   const box = document.createElement("div");
@@ -222,6 +224,8 @@ function buildWelcome(m) {
     const f = file.files?.[0]; if (!f) return;
     state.photo = await toSquareDataURL(f, 384);
     preview.src = state.photo;
+    // NEW: immediately tell server so host can update even before/after join
+    socket.emit("photo", { pid, photo: state.photo });
   };
 
   nameInput.addEventListener("input", () => {
@@ -236,8 +240,8 @@ function buildWelcome(m) {
     state.screen = "controller";
     render();
 
-    // Send join with persistent pid
-    socket.emit("join", { pid, name: state.name, photo: state.photo });
+    // Send join with persistent pid (+photo if present)
+    socket.emit("join", { pid, name: state.name, photo: state.photo || null });
 
     // Orientation/screen lock after sending
     await ensureLandscape();

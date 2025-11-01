@@ -12,20 +12,20 @@ const FRAME = { x: 10, y: 10, w: 1260, h: 700 };
 
 // Physics & broadcast rates (~60 Hz)
 const TICK_MS = 16;              // physics tick
-const SNAPSHOT_MS = 33;          // snapshots (what you called "nap")
+const SNAPSHOT_MS = 33;          // snapshots
 
 // Movement
 const SPEED_PPS = 220;                                // px/sec at full tilt
 const SPEED_PER_TICK = SPEED_PPS * (TICK_MS / 1000);  // per tick
 
 // Player collision (big avatar circle)
-const PLAYER_RADIUS = 48;        // matches host's strokeCircle radius 48
+const PLAYER_RADIUS = 48;        // matches host's circle radius 48
 const BOUNCE = 0.12;             // tiny response on overlap resolution
 
 /* -------------------- Server -------------------- */
 const app = express();
 app.use(cors());
-app.use(express.static("public"));     // put built client here if you want one URL
+app.use(express.static("public"));
 app.get("/health", (_, res) => res.send("OK"));
 
 const server = http.createServer(app);
@@ -38,14 +38,12 @@ const players = new Map(); // id -> { id,name,tint,team,n,photo,pos:{x,y},dir:{x
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 function spawnPos(id) {
-  // deterministic spread based on socket id (keeps spacing)
   const xo = FRAME.x + 130 + (id.charCodeAt(0) % 10) * 110;
   const yo = FRAME.y + 150 + (id.charCodeAt(1) % 7) * 80;
   return { x: xo, y: yo };
 }
 
 function lobbyPayload() {
-  // lightweight lobby info (no positions here)
   return [...players.values()].map(p => ({
     id: p.id,
     name: p.name,
@@ -57,7 +55,6 @@ function lobbyPayload() {
 }
 
 function snapshotPayload() {
-  // positions only (keep payload tiny @60 Hz)
   return {
     players: [...players.values()].map(p => ({
       id: p.id, x: p.pos.x | 0, y: p.pos.y | 0
@@ -68,7 +65,6 @@ function snapshotPayload() {
 /* -------------------- Sockets -------------------- */
 io.on("connection", (socket) => {
   socket.on("join", (data) => {
-    // Merge known fields but NEVER create extra avatars
     const name = String(data?.name || "anon").slice(0, 16);
     const tint = data?.tint || "#66ccff";
     const team = (data?.team === "X" || data?.team === "O") ? data.team : undefined;
@@ -87,18 +83,33 @@ io.on("connection", (socket) => {
     io.emit("lobby", lobbyPayload());
   });
 
-  // Continuous inputs (controller)
+  // Relay controller’s live texture updates (camera or upload)
+  socket.on("addtexture", (msg) => {
+    const p = players.get(socket.id);
+    if (!p) return;
+    const data = typeof msg?.data === "string" ? msg.data : null;
+    if (!data) return;
+
+    // Persist so host can also hydrate via future lobby payloads
+    p.photo = data;
+
+    // Broadcast to everyone (host will add/update 'ph-<id>' texture)
+    io.emit("addtexture", { id: socket.id, data });
+
+    // Also refresh lobby so late-join hosts get the photo too
+    io.emit("lobby", lobbyPayload());
+  });
+
+  // Movement / actions from controller
   socket.on("input", (msg) => {
     const p = players.get(socket.id);
     if (!p) return;
 
-    // 360° analog
     const dx = clamp(Number(msg?.dx || 0), -1, 1);
     const dy = clamp(Number(msg?.dy || 0), -1, 1);
     p.dir.x = Number.isFinite(dx) ? dx : 0;
     p.dir.y = Number.isFinite(dy) ? dy : 0;
 
-    // Actions 1/2 (broadcast only; your host UI can react)
     if (msg?.action === 1) io.emit("action", { by: p.id, action: 1 });
     if (msg?.action === 2) io.emit("action", { by: p.id, action: 2 });
   });
@@ -111,12 +122,10 @@ io.on("connection", (socket) => {
 
 /* -------------------- Physics @ ~60 Hz -------------------- */
 setInterval(() => {
-  // 1) Integrate motion
   for (const p of players.values()) {
     p.pos.x += p.dir.x * SPEED_PER_TICK;
     p.pos.y += p.dir.y * SPEED_PER_TICK;
 
-    // Clamp to frame (keep full circle in-bounds)
     const minX = FRAME.x + PLAYER_RADIUS;
     const maxX = FRAME.x + FRAME.w - PLAYER_RADIUS;
     const minY = FRAME.y + PLAYER_RADIUS;
@@ -126,7 +135,7 @@ setInterval(() => {
     p.pos.y = clamp(p.pos.y, minY, maxY);
   }
 
-  // 2) Resolve collisions between avatars only (big circles)
+  // Avatar-Avatar collisions only
   const list = [...players.values()];
   for (let i = 0; i < list.length; i++) {
     for (let j = i + 1; j < list.length; j++) {
@@ -137,28 +146,22 @@ setInterval(() => {
       let dist = Math.hypot(dx, dy);
 
       const minDist = PLAYER_RADIUS + PLAYER_RADIUS;
-      if (dist < 1e-6) {
-        // Coincident: nudge on X to avoid NaN
-        dx = 1; dy = 0; dist = 1;
-      }
+      if (dist < 1e-6) { dx = 1; dy = 0; dist = 1; }
 
       if (dist < minDist) {
         const overlap = minDist - dist;
         const nx = dx / dist;
         const ny = dy / dist;
 
-        // split push evenly
         const push = overlap / 2;
         a.pos.x -= nx * push; a.pos.y -= ny * push;
         b.pos.x += nx * push; b.pos.y += ny * push;
 
-        // small bounce based on each input direction (keeps them from sticking)
         a.pos.x -= a.dir.x * BOUNCE * overlap;
         a.pos.y -= a.dir.y * BOUNCE * overlap;
         b.pos.x -= b.dir.x * BOUNCE * overlap;
         b.pos.y -= b.dir.y * BOUNCE * overlap;
 
-        // re-clamp after resolution
         const minX = FRAME.x + PLAYER_RADIUS;
         const maxX = FRAME.x + FRAME.w - PLAYER_RADIUS;
         const minY = FRAME.y + PLAYER_RADIUS;
@@ -173,7 +176,7 @@ setInterval(() => {
   }
 }, TICK_MS);
 
-/* -------------------- Snapshots @ ~60 Hz -------------------- */
+/* -------------------- Snapshots @ ~30 Hz -------------------- */
 setInterval(() => {
   io.emit("snapshot", snapshotPayload());
 }, SNAPSHOT_MS);
