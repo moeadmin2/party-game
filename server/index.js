@@ -12,7 +12,7 @@ const FRAME = { x: 10, y: 10, w: 1260, h: 700 };
 
 // Physics & broadcast rates (~60 Hz)
 const TICK_MS = 16;              // physics tick
-const SNAPSHOT_MS = 16;          // snapshots (what you called "nap")
+const SNAPSHOT_MS = 33;          // snapshots (what you called "nap")
 
 // Movement
 const SPEED_PPS = 220;                                // px/sec at full tilt

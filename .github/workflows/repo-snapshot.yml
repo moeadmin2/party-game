@@ -1,0 +1,166 @@
+name: Repo Snapshot to Issue
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate per-file snapshots
+        id: gen
+        run: |
+          python3 - << 'PY'
+          import os, json, textwrap, hashlib
+
+          # Include whatever you like (add .vue, .svelte, .glsl, etc.)
+          exts = {
+            '.js','.mjs','.cjs','.ts','.tsx','.jsx',
+            '.html','.css','.json',
+            '.glsl','.frag','.vert'
+          }
+
+          # Skip heavy/derived dirs
+          skip_dirs = {'.git','node_modules','dist','build','.cache'}
+
+          files = []
+          for root, dirs, filenames in os.walk('.'):
+            if any(part in skip_dirs for part in root.split(os.sep)):
+              continue
+            for name in filenames:
+              _, ext = os.path.splitext(name.lower())
+              if ext in exts:
+                path = os.path.join(root, name)
+                try:
+                  with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                    content = f.read()
+                except Exception:
+                  continue
+                rel = path[2:] if path.startswith('./') else path
+                files.append((rel, content))
+
+          os.makedirs('snapshot_files', exist_ok=True)
+          index = []
+          for rel, content in sorted(files):
+            # pick language fence based on extension
+            lang = 'html' if rel.endswith('.html') else ('css' if rel.endswith('.css') else 'js')
+            body = f"### `{rel}`\n```{lang}\n{content}\n```\n"
+            h = hashlib.sha1(rel.encode()).hexdigest()[:8]
+            fn = f"snapshot_files/{h}.md"
+            with open(fn, 'w', encoding='utf-8') as w:
+              w.write(body)
+            index.append((rel, fn))
+
+          # Save index for next step
+          with open('snapshot_files/index.json','w',encoding='utf-8') as w:
+            json.dump(index, w)
+
+          print(f"::set-output name=count::{len(index)}")
+          PY
+
+      - name: Create/Update Snapshot Issue header
+        uses: actions/github-script@v7
+        id: header
+        with:
+          script: |
+            const title = 'Repo Snapshot (auto)';
+            const header = [
+              `**Branch:** ${context.ref}`,
+              `**Commit:** ${context.sha}`,
+              `**Pusher:** ${context.actor}`,
+              '',
+              '_This issue is auto-updated on each push to `main`. Each file is posted as a separate comment so external tools can read full source reliably._'
+            ].join('\n');
+
+            // Find existing issue
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'automated,repo-snapshot',
+              per_page: 100,
+            });
+
+            let issue = issues.find(i => i.title === title);
+            if (!issue) {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body: header,
+                labels: ['automated','repo-snapshot']
+              });
+              issue = created.data;
+            } else {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: header
+              });
+            }
+
+            core.setOutput('issue_number', issue.number.toString());
+
+      - name: Replace prior bot comments
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue_number = parseInt('${{ steps.header.outputs.issue_number }}',10);
+            let page = 1;
+            while (true) {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                per_page: 100,
+                page
+              });
+              if (!comments.length) break;
+              for (const c of comments) {
+                if (c.user && c.user.type === 'Bot') {
+                  await github.rest.issues.deleteComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    comment_id: c.id
+                  });
+                }
+              }
+              page++;
+            }
+
+      - name: Post one comment per file
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const issue_number = parseInt('${{ steps.header.outputs.issue_number }}',10);
+            const index = JSON.parse(fs.readFileSync('snapshot_files/index.json','utf8'));
+            for (const [rel, fn] of index) {
+              const body = fs.readFileSync(fn, 'utf8');
+              // Guard against GitHub's 65k-ish per comment limit
+              if (body.length > 60000) {
+                const head = `### \`${rel}\`\n_File too large for a single comment; please split this file or exclude large bundles._`;
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number,
+                  body: head
+                });
+                continue;
+              }
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                body
+              });
+            }
