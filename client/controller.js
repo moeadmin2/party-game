@@ -2,6 +2,18 @@
 import { socketConnect } from "./main.js";
 const socket = socketConnect();
 
+/* ---------- persistent player id ---------- */
+const PID_KEY = "pg_pid";
+function getPid() {
+  let pid = localStorage.getItem(PID_KEY);
+  if (!pid) {
+    pid = (self.crypto?.randomUUID?.() || Math.random().toString(36).slice(2) + Date.now());
+    localStorage.setItem(PID_KEY, pid);
+  }
+  return pid;
+}
+const pid = getPid();
+
 /* ---------- global state ---------- */
 const state = {
   screen: "welcome",   // "welcome" | "controller"
@@ -11,6 +23,10 @@ const state = {
   mySeq: null,
   myTeam: null,
 };
+
+/* ---------- shared UI refs (declare once!) ---------- */
+let uiRoot;
+let text1Ref, text2Ref, teamRef, nameRef, numRef, photoRef, b1, b2;
 
 document.documentElement.style.background = "#737373";
 document.body.style.margin = "0";
@@ -78,17 +94,48 @@ window.addEventListener("resize", scheduleRender);
 if (window.visualViewport) window.visualViewport.addEventListener("resize", scheduleRender);
 
 /* ---------- RTT/Ping ---------- */
-let rtt = 0, skew = 0;
+let rtt = 0;
 setInterval(() => socket.emit("rt", Date.now()), 1000);
-socket.on("rt", (t0, tServer) => {
+socket.on("rt", (t0) => {
   const now = Date.now();
-  rtt  = now - t0;
-  skew = (tServer + rtt/2) - now;
+  rtt = now - t0;
   if (text2Ref) text2Ref.textContent = `ping ${rtt} ms`;
 });
 
+/* ---------- socket lifecycle ---------- */
+socket.on("connect", () => {
+  // If we already joined before, ask server to resume this pid.
+  if (state.mySeq != null || state.name) {
+    socket.emit("resume", pid);
+  }
+});
+
+socket.on("disconnect", () => {
+  // Stay on controller; we'll resume on reconnect.
+  console.warn("socket disconnected; waiting to resume…");
+});
+
+socket.on("joined", (info)=>{
+  state.myId = info.id;
+  state.mySeq = info.n;
+  if (state.screen !== "controller") { state.screen = "controller"; }
+  render();
+});
+
+socket.on("snapshot", (snap)=>{
+  if (!state.myId) return;
+  const me = (snap.players || []).find(p => p.id === state.myId);
+  if (!me) return;
+  state.myTeam = me.team || null;
+  if (nameRef) nameRef.textContent = me.name || state.name || "";
+  if (numRef)  numRef.textContent  = String(me.n ?? state.mySeq ?? "");
+  if (teamRef) teamRef.textContent = state.myTeam ? `Team ${state.myTeam}` : "";
+  if (me.photo && photoRef && photoRef.getAttribute("data-src") !== me.photo){
+    photoRef.src = me.photo; photoRef.setAttribute("data-src", me.photo);
+  }
+});
+
 /* ---------- render ---------- */
-let uiRoot;
 function render() {
   const m = metrics();
   document.body.innerHTML = "";
@@ -182,31 +229,32 @@ function buildWelcome(m) {
     joinBtn.disabled = (state.name.trim().length === 0);
   });
 
-joinBtn.onclick = async () => {
-  state.name = nameInput.value.trim().slice(0, 12);
+  joinBtn.onclick = async () => {
+    state.name = nameInput.value.trim().slice(0, 12);
 
-  // Optimistically switch UI now (prevents resize-bounce back to welcome)
-  state.screen = "controller";
-  render();
+    // Optimistically switch to controller (prevents resize bounce)
+    state.screen = "controller";
+    render();
 
-  // Fire the join, then lock orientation (resizes won't kick us back)
-  socket.emit("join", { name: state.name, photo: state.photo });
-  await ensureLandscape();
-  try { await navigator.wakeLock?.request?.("screen"); } catch {}
+    // Send join with persistent pid
+    socket.emit("join", { pid, name: state.name, photo: state.photo });
 
-  // If server doesn't ack within 4s, go back with an error message
-  const started = Date.now();
-  const timer = setInterval(() => {
-    if (state.myId) { clearInterval(timer); return; }
-    if (Date.now() - started > 4000) {
-      clearInterval(timer);
-      alert("Could not join the game.\nCheck the URL’s &server=..., that the server is running on port 3000, and firewall rules.");
-      state.screen = "welcome";
-      render();
-    }
-  }, 200);
-};
+    // Orientation/screen lock after sending
+    await ensureLandscape();
+    try { await navigator.wakeLock?.request?.("screen"); } catch {}
 
+    // If server doesn't ack within 5s, return to welcome with error
+    const started = Date.now();
+    const timer = setInterval(() => {
+      if (state.myId) { clearInterval(timer); return; }
+      if (Date.now() - started > 5000) {
+        clearInterval(timer);
+        alert("Could not join the game.\nCheck the &server URL and that the server on port 3000 is reachable.");
+        state.screen = "welcome";
+        render();
+      }
+    }, 200);
+  };
 }
 
 /* =========================================================================
@@ -216,8 +264,6 @@ function divText(f, color, weight){ const d=document.createElement("div"); d.sty
 function roundBtn(label, d, f){ const b=document.createElement("button"); b.textContent=label;
   b.style.cssText=`position:absolute;width:${d}px;height:${d}px;border-radius:50%;border:0;background:#45a5ff;color:#051018;font:bold ${Math.round(f*0.85)}px system-ui;box-shadow:0 8px 20px rgba(0,0,0,0.35);touch-action:none;user-select:none;`; 
   b.addEventListener("pointerdown", ()=>{ b.animate([{transform:'scale(1)'},{transform:'scale(0.94)'},{transform:'scale(1)'}],{duration:120}); try{navigator.vibrate?.(20);}catch{} }); return b; }
-
-let text1Ref, text2Ref, teamRef, nameRef, numRef, photoRef, b1, b2;
 
 function buildController(m) {
   // prevent page scroll during control
@@ -325,27 +371,6 @@ async function toSquareDataURL(file, size=384){
 const PH="data:image/svg+xml;base64,"+btoa(`<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'>
   <rect width='200' height='200' fill='#eee'/><circle cx='100' cy='84' r='36' fill='#d7d7d7'/><rect x='52' y='124' rx='20' width='96' height='40' fill='#d7d7d7'/>
 </svg>`);
-
-/* ---------- server events ---------- */
-socket.on("joined", (info)=>{
-  state.myId = info.id;
-  state.mySeq = info.n;
-  state.screen = "controller";
-  render();
-});
-
-socket.on("snapshot", (snap)=>{
-  if (!state.myId) return;
-  const me = (snap.players || []).find(p => p.id === state.myId);
-  if (!me) return;
-  state.myTeam = me.team || null;
-  if (nameRef) nameRef.textContent = me.name || state.name || "";
-  if (numRef)  numRef.textContent  = String(me.n ?? state.mySeq ?? "");
-  if (teamRef) teamRef.textContent = state.myTeam ? `Team ${state.myTeam}` : "";
-  if (me.photo && photoRef && photoRef.getAttribute("data-src") !== me.photo){
-    photoRef.src = me.photo; photoRef.setAttribute("data-src", me.photo);
-  }
-});
 
 /* ---------- boot ---------- */
 render();
